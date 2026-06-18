@@ -29,8 +29,7 @@ const CSRF_HEADER = "x-csrf-token";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_LOCK_MS = 1000 * 60 * 5;
-const COOKIE_SECURE = HTTPS_ENABLED || process.env.COOKIE_SECURE === "true";
-const sessions = new Map();
+const COOKIE_SECURE = HTTPS_ENABLED || IS_VERCEL || process.env.COOKIE_SECURE === "true";
 const loginAttempts = new Map();
 const ALLOWED_CATEGORIES = new Set(["Materiaux", "Alimentation", "Equipement", "Autre"]);
 const PRODUCT_FIELDS = new Set(["name", "category", "quantity", "threshold", "unitPrice", "updatedAt"]);
@@ -132,10 +131,53 @@ function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
 }
 
+function base64UrlEncode(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function base64UrlDecode(value) {
+  return Buffer.from(value, "base64url").toString("utf8");
+}
+
 function configuredUsers() {
   return USER_ENV_KEYS
     .map(user => ({ role: user.role, passwordHash: process.env[user.env] }))
     .filter(user => Boolean(user.passwordHash));
+}
+
+function sessionSecret() {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+
+  const hashes = configuredUsers().map(user => user.passwordHash).join("|");
+  return crypto.createHash("sha256").update(`${hashes}|dd-service-session`).digest("hex");
+}
+
+function sign(value) {
+  return crypto.createHmac("sha256", sessionSecret()).update(value).digest("base64url");
+}
+
+function createSessionToken(session) {
+  const payload = base64UrlEncode(JSON.stringify(session));
+  return `${payload}.${sign(payload)}`;
+}
+
+function readSessionToken(token) {
+  const [payload, signature] = String(token || "").split(".");
+  if (!payload || !signature) return null;
+
+  const expectedSignature = sign(payload);
+  const validSignature = crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(expectedSignature)
+  );
+
+  if (!validSignature) return null;
+
+  try {
+    return JSON.parse(base64UrlDecode(payload));
+  } catch {
+    return null;
+  }
 }
 
 function findUserByPassword(password) {
@@ -162,13 +204,11 @@ function getSession(request) {
   const token = parseCookies(request)[SESSION_COOKIE];
   if (!token) return null;
 
-  const session = sessions.get(token);
+  const session = readSessionToken(token);
   if (!session || session.expiresAt < Date.now()) {
-    sessions.delete(token);
     return null;
   }
 
-  session.expiresAt = Date.now() + SESSION_TTL_MS;
   return session;
 }
 
@@ -465,9 +505,12 @@ async function handleApi(request, response, pathname) {
     }
 
     clearLoginFailures(ip);
-    const token = crypto.randomBytes(32).toString("hex");
     const csrfToken = crypto.randomBytes(32).toString("hex");
-    sessions.set(token, { csrfToken, role: user.role, expiresAt: Date.now() + SESSION_TTL_MS });
+    const token = createSessionToken({
+      csrfToken,
+      role: user.role,
+      expiresAt: Date.now() + SESSION_TTL_MS
+    });
 
     response.setHeader("Set-Cookie", [
       cookie(SESSION_COOKIE, token, { httpOnly: true }),
@@ -480,9 +523,6 @@ async function handleApi(request, response, pathname) {
   if (request.method === "POST" && pathname === "/api/logout") {
     const session = getSession(request);
     if (!requireCsrf(request, response, session)) return;
-
-    const token = parseCookies(request)[SESSION_COOKIE];
-    if (token) sessions.delete(token);
 
     response.setHeader("Set-Cookie", [
       cookie(SESSION_COOKIE, "", { httpOnly: true, maxAge: 0 }),
