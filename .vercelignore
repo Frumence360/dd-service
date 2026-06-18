@@ -1,0 +1,7 @@
+.env
+certs/
+data/backups/
+*.log
+*.tmp
+desktop-*.png
+mobile-*.png

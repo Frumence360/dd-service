@@ -1,0 +1,14 @@
+{
+  "name": "dd-service-stock",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Application de gestion de stock DD Service.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}

@@ -591,10 +591,11 @@ function serveStatic(request, response, pathname) {
   });
 }
 
-const server = http.createServer(async (request, response) => {
+async function requestHandler(request, response) {
   try {
     applySecurityHeaders(response);
-    const { pathname } = new URL(request.url, `http://${request.headers.host}`);
+    const protocol = HTTPS_ENABLED ? "https" : "http";
+    const { pathname } = new URL(request.url, `${protocol}://${request.headers.host}`);
 
     if (pathname.startsWith("/api/")) {
       await handleApi(request, response, pathname);
@@ -605,7 +606,9 @@ const server = http.createServer(async (request, response) => {
   } catch (error) {
     sendJson(response, 500, { error: error.message || "Erreur serveur" });
   }
-});
+}
+
+const server = http.createServer(requestHandler);
 
 function createServer() {
   if (!HTTPS_ENABLED) return server;
@@ -635,20 +638,31 @@ function createServer() {
   });
 }
 
-ensureDataFile();
-const activeServer = createServer();
-activeServer.on("error", error => {
-  if (error.code === "EADDRINUSE") {
-    console.error(`Le port ${PORT} est deja utilise.`);
-    console.error("Ferme l'autre serveur ou lance avec une autre valeur PORT, par exemple: set PORT=3001");
+function startServer() {
+  ensureDataFile();
+  const activeServer = createServer();
+  activeServer.on("error", error => {
+    if (error.code === "EADDRINUSE") {
+      console.error(`Le port ${PORT} est deja utilise.`);
+      console.error("Ferme l'autre serveur ou lance avec une autre valeur PORT, par exemple: set PORT=3001");
+      process.exit(1);
+    }
+
+    console.error("Erreur serveur:", error.message);
     process.exit(1);
-  }
+  });
 
-  console.error("Erreur serveur:", error.message);
-  process.exit(1);
-});
+  activeServer.listen(PORT, () => {
+    const protocol = HTTPS_ENABLED ? "https" : "http";
+    console.log(`DD Service disponible sur ${protocol}://localhost:${PORT}`);
+  });
+}
 
-activeServer.listen(PORT, () => {
-  const protocol = HTTPS_ENABLED ? "https" : "http";
-  console.log(`DD Service disponible sur ${protocol}://localhost:${PORT}`);
-});
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  requestHandler,
+  startServer
+};
