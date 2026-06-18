@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
+const os = require("os");
 const path = require("path");
 
 const ROOT = __dirname;
@@ -11,9 +12,12 @@ const PORT = Number(process.env.PORT) || 3000;
 const HTTPS_ENABLED = process.env.HTTPS_ENABLED === "true";
 const HTTPS_PFX = process.env.HTTPS_PFX || path.join(ROOT, "certs", "localhost.pfx");
 const HTTPS_PASSPHRASE = process.env.HTTPS_PASSPHRASE || "";
+const IS_VERCEL = Boolean(process.env.VERCEL);
 const DATA_DIR = path.join(ROOT, "data");
-const DATA_FILE = path.join(DATA_DIR, "stock.json");
-const BACKUP_DIR = path.join(DATA_DIR, "backups");
+const SEED_DATA_FILE = path.join(DATA_DIR, "stock.json");
+const RUNTIME_DATA_DIR = IS_VERCEL ? path.join(os.tmpdir(), "dd-service-data") : DATA_DIR;
+const DATA_FILE = path.join(RUNTIME_DATA_DIR, "stock.json");
+const BACKUP_DIR = path.join(RUNTIME_DATA_DIR, "backups");
 const USER_ENV_KEYS = [
   { role: "admin", env: "ADMIN_PASSWORD_HASH" },
   { role: "magasinier", env: "MAGASINIER_PASSWORD_HASH" },
@@ -93,10 +97,15 @@ function applySecurityHeaders(response) {
 }
 
 function ensureDataFile() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(RUNTIME_DATA_DIR, { recursive: true });
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
   if (!fs.existsSync(DATA_FILE)) {
+    if (IS_VERCEL && fs.existsSync(SEED_DATA_FILE)) {
+      fs.copyFileSync(SEED_DATA_FILE, DATA_FILE);
+      return;
+    }
+
     fs.writeFileSync(DATA_FILE, JSON.stringify({ products: {}, history: [] }, null, 2));
   }
 }
