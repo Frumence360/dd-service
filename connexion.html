@@ -61,6 +61,12 @@
           return;
         }
 
+        if (response.status === 500) {
+          const data = await response.json();
+          message.textContent = data.error || "Configuration serveur incomplete.";
+          return;
+        }
+
         message.textContent = "Ouvre l'application avec le lanceur HTTPS.";
       } catch {
         message.textContent = "Serveur indisponible. Lance le serveur puis ouvre l'adresse HTTPS affichee.";

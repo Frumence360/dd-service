@@ -14,19 +14,10 @@ const HTTPS_PASSPHRASE = process.env.HTTPS_PASSPHRASE || "";
 const DATA_DIR = path.join(ROOT, "data");
 const DATA_FILE = path.join(DATA_DIR, "stock.json");
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
-const USERS = [
-  {
-    role: "admin",
-    passwordHash: requiredEnv("ADMIN_PASSWORD_HASH")
-  },
-  {
-    role: "magasinier",
-    passwordHash: requiredEnv("MAGASINIER_PASSWORD_HASH")
-  },
-  {
-    role: "lecture",
-    passwordHash: requiredEnv("LECTURE_PASSWORD_HASH")
-  }
+const USER_ENV_KEYS = [
+  { role: "admin", env: "ADMIN_PASSWORD_HASH" },
+  { role: "magasinier", env: "MAGASINIER_PASSWORD_HASH" },
+  { role: "lecture", env: "LECTURE_PASSWORD_HASH" }
 ];
 const SESSION_COOKIE = "manfordSession";
 const CSRF_COOKIE = "manfordCsrf";
@@ -59,16 +50,6 @@ function loadEnvFile() {
         process.env[key] = value;
       }
     });
-}
-
-function requiredEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    console.error(`Variable d'environnement manquante: ${name}`);
-    process.exit(1);
-  }
-
-  return value;
 }
 
 const mimeTypes = {
@@ -142,10 +123,16 @@ function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
 }
 
+function configuredUsers() {
+  return USER_ENV_KEYS
+    .map(user => ({ role: user.role, passwordHash: process.env[user.env] }))
+    .filter(user => Boolean(user.passwordHash));
+}
+
 function findUserByPassword(password) {
   const passwordHash = hashPassword(password);
 
-  return USERS.find(user => user.passwordHash === passwordHash) || null;
+  return configuredUsers().find(user => user.passwordHash === passwordHash) || null;
 }
 
 function parseCookies(request) {
@@ -436,6 +423,13 @@ async function handleApi(request, response, pathname) {
 
   if (request.method === "POST" && pathname === "/api/login") {
     const { ip, state } = loginState(request);
+
+    if (configuredUsers().length === 0) {
+      sendJson(response, 500, {
+        error: "Configuration serveur incomplete: variables de mots de passe manquantes."
+      });
+      return;
+    }
 
     if (state.lockedUntil > Date.now()) {
       const retryAfter = Math.ceil((state.lockedUntil - Date.now()) / 1000);
