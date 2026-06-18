@@ -2,13 +2,7 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "includeFiles": [
-        "*.html",
-        "style.css",
-        "data/stock.json",
-        "image/**",
-        "js/**"
-      ]
+      "includeFiles": "{*.html,style.css,data/stock.json,image/**,js/**}"
     }
   },
   "routes": [
