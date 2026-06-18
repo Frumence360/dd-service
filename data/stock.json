@@ -1,0 +1,70 @@
+{
+  "products": {
+    "ciment gris": {
+      "name": "Ciment gris",
+      "category": "Materiaux",
+      "quantity": 45,
+      "threshold": 15,
+      "unitPrice": 12,
+      "updatedAt": "2026-06-18T17:30:14.691Z"
+    },
+    "casque de protection": {
+      "name": "Casque de protection",
+      "category": "Equipement",
+      "quantity": 8,
+      "threshold": 10,
+      "unitPrice": 7.5,
+      "updatedAt": "2026-06-18T17:30:14.692Z"
+    },
+    "huile vegetale": {
+      "name": "Huile vegetale",
+      "category": "Alimentation",
+      "quantity": 30,
+      "threshold": 12,
+      "unitPrice": 4,
+      "updatedAt": "2026-06-18T17:30:14.692Z"
+    },
+    "farine de ble": {
+      "name": "Farine de ble",
+      "category": "Alimentation",
+      "quantity": 60,
+      "threshold": 20,
+      "unitPrice": 2.2,
+      "updatedAt": "2026-06-18T17:30:14.692Z"
+    }
+  },
+  "history": [
+    {
+      "date": "2026-06-18T17:30:14.691Z",
+      "product": "Ciment gris",
+      "type": "Entree",
+      "quantity": 45,
+      "remaining": 45,
+      "note": "Donnees de demonstration"
+    },
+    {
+      "date": "2026-06-18T17:30:14.692Z",
+      "product": "Casque de protection",
+      "type": "Entree",
+      "quantity": 8,
+      "remaining": 8,
+      "note": "Donnees de demonstration"
+    },
+    {
+      "date": "2026-06-18T17:30:14.692Z",
+      "product": "Huile vegetale",
+      "type": "Entree",
+      "quantity": 30,
+      "remaining": 30,
+      "note": "Donnees de demonstration"
+    },
+    {
+      "date": "2026-06-18T17:30:14.692Z",
+      "product": "Farine de ble",
+      "type": "Entree",
+      "quantity": 60,
+      "remaining": 60,
+      "note": "Donnees de demonstration"
+    }
+  ]
+}

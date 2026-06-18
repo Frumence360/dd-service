@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DD Service | Deconnexion</title>
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-panel" aria-labelledby="logout-title">
+      <a class="brand auth-brand" href="index.html">
+        <img src="image/logos.jpg" alt="" class="brand-logo">
+        <span>DD Service</span>
+      </a>
+      <p class="eyebrow">Session administrateur</p>
+      <h1 id="logout-title">Deconnexion</h1>
+      <p class="auth-copy">Confirme la fermeture de la session du tableau de bord.</p>
+
+      <div class="hero-actions">
+        <button class="button primary" id="logoutConfirmButton" type="button">Se deconnecter</button>
+        <a class="button secondary" href="stock.html">Annuler</a>
+      </div>
+      <p class="form-message" id="message" role="status"></p>
+    </section>
+  </main>
+
+  <script>
+    function csrfToken() {
+      return document.cookie
+        .split(";")
+        .map(cookie => cookie.trim())
+        .find(cookie => cookie.startsWith("manfordCsrf="))
+        ?.split("=")
+        .slice(1)
+        .join("=") || "";
+    }
+
+    document.getElementById("logoutConfirmButton").addEventListener("click", async () => {
+      const response = await fetch("/api/logout", {
+        method: "POST",
+        headers: { "X-CSRF-Token": decodeURIComponent(csrfToken()) }
+      });
+
+      if (response.ok) {
+        window.location.href = "connexion.html";
+        return;
+      }
+
+      document.getElementById("message").textContent = "Deconnexion impossible. Recharge la page puis reessaie.";
+    });
+  </script>
+</body>
+</html>

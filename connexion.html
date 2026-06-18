@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DD Service | Acces securise</title>
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-panel" aria-labelledby="auth-title">
+      <a class="brand auth-brand" href="index.html">
+        <img src="image/logos.jpg" alt="" class="brand-logo">
+        <span>DD Service</span>
+      </a>
+      <p class="eyebrow">Espace administrateur</p>
+      <h1 id="auth-title">Connexion au tableau de bord</h1>
+      <p class="auth-copy">
+        Cet acces limite l'ouverture de l'interface de demonstration. Pour une mise
+        en production, l'authentification doit etre geree par un serveur.
+      </p>
+
+      <form id="loginForm" class="auth-form">
+        <label for="password">Mot de passe</label>
+        <input type="password" id="password" autocomplete="current-password" required>
+        <button class="button primary" type="submit">Se connecter</button>
+        <p class="form-message" id="message" role="status"></p>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    document.getElementById("loginForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      const password = document.getElementById("password").value;
+      const message = document.getElementById("message");
+      message.textContent = "";
+
+      try {
+        const response = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password })
+        });
+
+        if (response.ok) {
+          window.location.href = "stock.html";
+          return;
+        }
+
+        if (response.status === 401) {
+          const data = await response.json();
+          message.textContent = `Mot de passe incorrect. Tentatives restantes: ${data.remainingAttempts}.`;
+          return;
+        }
+
+        if (response.status === 429) {
+          const data = await response.json();
+          const minutes = Math.ceil((data.retryAfter || 0) / 60);
+          message.textContent = `Trop de tentatives. Reessaie dans ${minutes} minute(s).`;
+          return;
+        }
+
+        message.textContent = "Ouvre l'application avec le lanceur HTTPS.";
+      } catch {
+        message.textContent = "Serveur indisponible. Lance le serveur puis ouvre l'adresse HTTPS affichee.";
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+certs/
+data/backups/
+.env
+*.log
+*.tmp
+csrf-cookies.txt
+desktop-*.png
+mobile-*.png

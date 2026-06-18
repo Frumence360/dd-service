@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DD Service | Gestion de stock</title>
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="DD Service">
+      <img src="image/logos.jpg" alt="" class="brand-logo">
+      <span>DD Service</span>
+    </a>
+    <nav class="main-nav" aria-label="Navigation principale">
+      <a href="index.html">Accueil</a>
+      <a href="#produits">Produits suivis</a>
+      <a href="#localisation">Localisation</a>
+      <a class="nav-action" href="connexion.html">Acces stock</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <img src="image/so1.jpg" alt="Equipe et environnement de gestion de stock" class="hero-image">
+      <div class="hero-content">
+        <p class="eyebrow">Plateforme academique de gestion</p>
+        <h1 id="hero-title">Gestion informatisee du stock pour petites entreprises</h1>
+        <p>
+          DD Service centralise les mouvements d'entree et de sortie,
+          suit les alertes de stock et produit des indicateurs utiles a la decision.
+        </p>
+        <div class="hero-actions">
+          <a class="button primary" href="connexion.html">Ouvrir le tableau de bord</a>
+          <a class="button secondary" href="#solution">Voir la demarche</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="solution">
+      <div class="section-heading">
+        <p class="eyebrow">Contexte du projet</p>
+        <h2>Une solution orientee soutenance et usage reel</h2>
+        <p>
+          Le projet repond au besoin de mieux controler les stocks dans une petite
+          structure commerciale : connaitre les quantites disponibles, tracer les
+          mouvements et detecter rapidement les ruptures.
+        </p>
+      </div>
+
+      <div class="feature-grid">
+        <article class="info-card">
+          <h3>Suivi des mouvements</h3>
+          <p>Chaque operation conserve le produit, le type de mouvement, la quantite, la date et le stock restant.</p>
+        </article>
+        <article class="info-card">
+          <h3>Alertes de stock</h3>
+          <p>Les produits sous le seuil critique sont identifies pour faciliter le reapprovisionnement.</p>
+        </article>
+        <article class="info-card">
+          <h3>Aide a la decision</h3>
+          <p>Les tableaux et graphiques donnent une lecture rapide de l'etat du magasin.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section muted" id="produits">
+      <div class="section-heading">
+        <p class="eyebrow">Exemples de produits</p>
+        <h2>Articles pouvant etre suivis par le systeme</h2>
+      </div>
+
+      <div class="product-grid">
+        <article class="product-card">
+          <img src="image/b.jpg" alt="Casques de protection">
+          <div>
+            <h3>Casques</h3>
+            <p>Equipements de protection necessaires au travail en securite.</p>
+          </div>
+        </article>
+        <article class="product-card">
+          <img src="image/c.jpg" alt="Sacs de ciment">
+          <div>
+            <h3>Ciment</h3>
+            <p>Produit de construction dont le suivi evite les ruptures de chantier.</p>
+          </div>
+        </article>
+        <article class="product-card">
+          <img src="image/d.png" alt="Bidons d'huile">
+          <div>
+            <h3>Huile</h3>
+            <p>Produit de consommation suivi par quantite disponible et mouvements.</p>
+          </div>
+        </article>
+        <article class="product-card">
+          <img src="image/a.webp" alt="Sacs de farine">
+          <div>
+            <h3>Farine</h3>
+            <p>Matiere premiere dont la disponibilite influence les ventes quotidiennes.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="localisation">
+      <div class="section-heading">
+        <p class="eyebrow">Zone d'etude</p>
+        <h2>Localisation du projet</h2>
+        <p>Le cas d'etude est situe a Lubumbashi, en Republique Democratique du Congo.</p>
+      </div>
+      <div class="map-frame">
+        <iframe
+          title="Carte de Lubumbashi"
+          src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3978.546575038278!2d27.47850161475694!3d-11.664114791749106!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x19463e984470a9f3%3A0xb6e8b4295d2b8a87!2sLubumbashi!5e0!3m2!1sfr!2scd!4v1719953780000!5m2!1sfr!2scd"
+          loading="lazy"
+          referrerpolicy="no-referrer-when-downgrade"
+          allowfullscreen>
+        </iframe>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>&copy; 2026 DD Service. Projet academique de gestion de stock.</p>
+    <a class="footer-button" href="concepteur.html">Voir le concepteur</a>
+  </footer>
+  <script>
+    document.querySelectorAll(".main-nav a[href]").forEach(link => {
+      const href = link.getAttribute("href");
+
+      if (href === "index.html" && !window.location.hash) {
+        link.classList.add("is-active");
+      }
+
+      if (href === window.location.hash) {
+        link.classList.add("is-active");
+      }
+
+      link.addEventListener("click", () => {
+        document.querySelectorAll(".main-nav a").forEach(item => item.classList.remove("is-active"));
+        link.classList.add("is-active");
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DD Service | Tableau de bord stock</title>
+  <script src="js/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body class="dashboard-page">
+  <header class="app-header">
+    <a class="brand" href="index.html">
+      <img src="image/logos.jpg" alt="" class="brand-logo">
+      <span>DD Service</span>
+    </a>
+    <nav class="main-nav" aria-label="Navigation du tableau de bord">
+      <a href="index.html">Accueil</a>
+      <a class="link-button" href="deconnexion.html">Deconnexion</a>
+    </nav>
+  </header>
+
+  <main class="dashboard-shell">
+    <section class="dashboard-title">
+      <div>
+        <p class="eyebrow">Module operationnel</p>
+        <h1>Tableau de bord de gestion de stock</h1>
+        <p>Controle des produits, suivi des mouvements et indicateurs d'aide a la decision.</p>
+      </div>
+      <div class="toolbar">
+        <button class="button secondary" id="seedButton" type="button">Charger un exemple</button>
+        <button class="button secondary" id="exportButton" type="button">Exporter CSV</button>
+      </div>
+    </section>
+
+    <section class="metric-grid" aria-label="Indicateurs principaux">
+      <article class="metric-card">
+        <span>Produits</span>
+        <strong id="productCount">0</strong>
+      </article>
+      <article class="metric-card">
+        <span>Stock total</span>
+        <strong id="totalQuantity">0</strong>
+      </article>
+      <article class="metric-card">
+        <span>Valeur estimee</span>
+        <strong id="stockValue">0 USD</strong>
+      </article>
+      <article class="metric-card danger">
+        <span>Alertes</span>
+        <strong id="alertCount">0</strong>
+      </article>
+    </section>
+
+    <section class="workspace-grid">
+      <form id="productForm" class="panel form-panel">
+        <div class="panel-heading">
+          <h2 id="formTitle">Enregistrer un mouvement</h2>
+          <button class="link-button hidden" id="cancelEditButton" type="button">Annuler</button>
+        </div>
+
+        <label for="name">Produit</label>
+        <input id="name" name="name" type="text" placeholder="Ex. Ciment gris" required>
+
+        <label for="category">Categorie</label>
+        <select id="category" name="category" required>
+          <option value="Materiaux">Materiaux</option>
+          <option value="Alimentation">Alimentation</option>
+          <option value="Equipement">Equipement</option>
+          <option value="Autre">Autre</option>
+        </select>
+
+        <div class="form-row">
+          <div>
+            <label for="movement">Mouvement</label>
+            <select id="movement" name="movement" required>
+              <option value="in">Entree</option>
+              <option value="out">Sortie</option>
+            </select>
+          </div>
+          <div>
+            <label for="quantity">Quantite</label>
+            <input id="quantity" name="quantity" type="number" min="1" step="1" required>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div>
+            <label for="threshold">Seuil d'alerte</label>
+            <input id="threshold" name="threshold" type="number" min="0" step="1" value="10" required>
+          </div>
+          <div>
+            <label for="unitPrice">Prix unitaire USD</label>
+            <input id="unitPrice" name="unitPrice" type="number" min="0" step="0.01" value="0" required>
+          </div>
+        </div>
+
+        <label for="note">Observation</label>
+        <textarea id="note" name="note" rows="3" placeholder="Ex. Livraison fournisseur, vente comptoir..."></textarea>
+
+        <button class="button primary" type="submit">Enregistrer le mouvement</button>
+        <p class="form-message" id="formMessage" role="status"></p>
+      </form>
+
+      <section class="panel table-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Inventaire</h2>
+            <p>Etat actuel des produits suivis.</p>
+          </div>
+          <input id="searchInput" class="search-input" type="search" placeholder="Rechercher un produit">
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Produit</th>
+                <th>Categorie</th>
+                <th>Stock</th>
+                <th>Seuil</th>
+                <th>Valeur</th>
+                <th>Statut</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="inventoryBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section class="charts-grid">
+      <article class="panel">
+        <div class="panel-heading">
+          <h2>Repartition du stock</h2>
+        </div>
+        <canvas id="stockChart"></canvas>
+      </article>
+      <article class="panel">
+        <div class="panel-heading">
+          <h2>Historique recent</h2>
+        </div>
+        <div class="table-wrap compact">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Produit</th>
+                <th>Type</th>
+                <th>Qte</th>
+                <th>Restant</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const STORAGE_KEY = "manfordStockDB";
+    const HISTORY_KEY = "manfordStockHistory";
+    const products = {};
+    const history = [];
+    let editingProduct = null;
+    let activeMovementButton = null;
+    let currentRole = null;
+
+    const currency = new Intl.NumberFormat("fr-FR", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 2
+    });
+
+    const stockChart = window.Chart
+      ? new Chart(document.getElementById("stockChart"), {
+          type: "bar",
+          data: {
+            labels: [],
+            datasets: [{
+              label: "Quantite disponible",
+              data: [],
+              backgroundColor: "#1f6feb"
+            }]
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: false }
+            },
+            scales: {
+              y: { beginAtZero: true }
+            }
+          }
+        })
+      : {
+          data: { labels: [], datasets: [{ data: [] }] },
+          update() {}
+        };
+
+    async function loadData() {
+      const sessionResponse = await fetch("/api/session");
+      const session = await sessionResponse.json();
+
+      if (!session.authenticated) {
+        window.location.href = "connexion.html";
+        return;
+      }
+
+      currentRole = session.role;
+
+      const response = await fetch("/api/stock");
+      if (response.status === 401) {
+        window.location.href = "connexion.html";
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error("Impossible de charger les donnees du serveur.");
+      }
+
+      const data = await response.json();
+      Object.assign(products, data.products || {});
+      history.splice(0, history.length, ...(Array.isArray(data.history) ? data.history : []));
+    }
+
+    function canWriteStock() {
+      return ["admin", "magasinier"].includes(currentRole);
+    }
+
+    function canDeleteProduct() {
+      return currentRole === "admin";
+    }
+
+    function applyRoleUI() {
+      const readOnly = !canWriteStock();
+      const form = document.getElementById("productForm");
+      const message = document.getElementById("formMessage");
+
+      form.querySelectorAll("input, select, textarea, button").forEach(control => {
+        control.disabled = readOnly;
+      });
+
+      document.getElementById("seedButton").disabled = readOnly;
+
+      if (readOnly) {
+        message.textContent = "Acces lecture seule: les modifications sont desactivees.";
+      }
+    }
+
+    function csrfToken() {
+      return document.cookie
+        .split(";")
+        .map(cookie => cookie.trim())
+        .find(cookie => cookie.startsWith("manfordCsrf="))
+        ?.split("=")
+        .slice(1)
+        .join("=") || "";
+    }
+
+    async function saveData() {
+      const response = await fetch("/api/stock", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": decodeURIComponent(csrfToken())
+        },
+        body: JSON.stringify({ products, history })
+      });
+
+      if (response.status === 401) {
+        window.location.href = "connexion.html";
+        return false;
+      }
+
+      if (!response.ok) {
+        document.getElementById("formMessage").textContent = "Enregistrement serveur impossible.";
+        return false;
+      }
+
+      return true;
+    }
+
+    function normalizeName(value) {
+      return value.trim().replace(/\s+/g, " ");
+    }
+
+    function productKey(value) {
+      return normalizeName(value)
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLocaleLowerCase("fr-FR");
+    }
+
+    function normalizeStoredProducts() {
+      const normalizedProducts = {};
+
+      Object.values(products).forEach(product => {
+        const name = normalizeName(product.name || "");
+        if (!name) return;
+
+        const key = productKey(name);
+        const normalizedProduct = {
+          ...product,
+          name,
+          quantity: Number(product.quantity) || 0,
+          threshold: Number(product.threshold) || 0,
+          unitPrice: Number(product.unitPrice) || 0
+        };
+
+        if (normalizedProducts[key]) {
+          normalizedProducts[key].quantity += normalizedProduct.quantity;
+          normalizedProducts[key].threshold = Math.max(
+            normalizedProducts[key].threshold,
+            normalizedProduct.threshold
+          );
+          normalizedProducts[key].unitPrice = normalizedProducts[key].unitPrice || normalizedProduct.unitPrice;
+          normalizedProducts[key].updatedAt = normalizedProduct.updatedAt || normalizedProducts[key].updatedAt;
+          return;
+        }
+
+        normalizedProducts[key] = normalizedProduct;
+      });
+
+      Object.keys(products).forEach(key => delete products[key]);
+      Object.assign(products, normalizedProducts);
+    }
+
+    function migrateLocalData() {
+      const legacyData = JSON.parse(localStorage.getItem("stockDB") || "{}");
+      const localProducts = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      const localHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+
+      Object.entries(legacyData).forEach(([name, value]) => {
+        const key = productKey(name);
+        if (!products[key]) {
+          products[key] = {
+            name: normalizeName(name),
+            category: "Autre",
+            quantity: Number(value.stock) || 0,
+            threshold: 10,
+            unitPrice: 0,
+            updatedAt: new Date().toISOString()
+          };
+        }
+      });
+
+      Object.values(localProducts).forEach(product => {
+        const key = productKey(product.name || "");
+        if (key && !products[key]) {
+          products[key] = product;
+        }
+      });
+
+      if (history.length === 0 && Array.isArray(localHistory)) {
+        history.push(...localHistory);
+      }
+    }
+
+    function productStatus(product) {
+      if (product.quantity <= 0) return "Rupture";
+      if (product.quantity <= product.threshold) return "Stock bas";
+      return "Disponible";
+    }
+
+    function statusClass(product) {
+      if (product.quantity <= 0) return "status danger";
+      if (product.quantity <= product.threshold) return "status warning";
+      return "status success";
+    }
+
+    function addHistory(product, movement, quantity, note) {
+      history.push({
+        date: new Date().toISOString(),
+        product: product.name,
+        type: movement === "in" ? "Entree" : "Sortie",
+        quantity,
+        remaining: product.quantity,
+        note
+      });
+
+      if (history.length > 200) {
+        history.splice(0, history.length - 200);
+      }
+    }
+
+    function setButtonWorking(button, isWorking) {
+      if (!button) return;
+
+      button.classList.toggle("is-active", isWorking);
+      button.disabled = isWorking;
+    }
+
+    function setActiveMovementButton(button) {
+      if (activeMovementButton && activeMovementButton !== button) {
+        activeMovementButton.classList.remove("is-active");
+      }
+
+      activeMovementButton = button;
+      if (activeMovementButton) {
+        activeMovementButton.classList.add("is-active");
+      }
+    }
+
+    function flashButton(button) {
+      if (!button) return;
+
+      button.classList.add("is-active");
+      window.setTimeout(() => button.classList.remove("is-active"), 450);
+    }
+
+    function renderMetrics(list) {
+      const allProducts = Object.values(products);
+      const totalQuantity = allProducts.reduce((sum, item) => sum + item.quantity, 0);
+      const value = allProducts.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
+      const alerts = allProducts.filter(item => item.quantity <= item.threshold).length;
+
+      document.getElementById("productCount").textContent = allProducts.length;
+      document.getElementById("totalQuantity").textContent = totalQuantity;
+      document.getElementById("stockValue").textContent = currency.format(value);
+      document.getElementById("alertCount").textContent = alerts;
+
+      stockChart.data.labels = list.map(item => item.name);
+      stockChart.data.datasets[0].data = list.map(item => item.quantity);
+      stockChart.update();
+    }
+
+    function renderInventory() {
+      const query = productKey(document.getElementById("searchInput").value);
+      const list = Object.values(products)
+        .filter(item => productKey(item.name).includes(query) || productKey(item.category).includes(query))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      const body = document.getElementById("inventoryBody");
+      body.replaceChildren();
+
+      if (list.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 7;
+        cell.className = "empty-state";
+        cell.textContent = "Aucun produit enregistre.";
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
+
+      list.forEach(product => {
+        const row = document.createElement("tr");
+        const values = [
+          product.name,
+          product.category,
+          product.quantity,
+          product.threshold,
+          currency.format(product.quantity * product.unitPrice)
+        ];
+
+        values.forEach(value => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        });
+
+        const statusCell = document.createElement("td");
+        const badge = document.createElement("span");
+        badge.className = statusClass(product);
+        badge.textContent = productStatus(product);
+        statusCell.appendChild(badge);
+        row.appendChild(statusCell);
+
+        const actionCell = document.createElement("td");
+        const editButton = document.createElement("button");
+        editButton.className = "table-action";
+        editButton.type = "button";
+        editButton.textContent = "Mouvement";
+        editButton.disabled = !canWriteStock();
+        editButton.addEventListener("click", () => {
+          setActiveMovementButton(editButton);
+          startEdit(productKey(product.name));
+        });
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "table-action danger-text";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Supprimer";
+        deleteButton.disabled = !canDeleteProduct();
+        deleteButton.addEventListener("click", () => {
+          flashButton(deleteButton);
+          deleteProduct(productKey(product.name));
+        });
+
+        actionCell.append(editButton, deleteButton);
+        row.appendChild(actionCell);
+        body.appendChild(row);
+      });
+
+      renderMetrics(list);
+      renderHistory();
+    }
+
+    function renderHistory() {
+      const body = document.getElementById("historyBody");
+      body.replaceChildren();
+
+      history.slice(-12).reverse().forEach(item => {
+        const row = document.createElement("tr");
+        const date = new Date(item.date).toLocaleString("fr-FR");
+        [date, item.product, item.type, item.quantity, item.remaining].forEach(value => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        });
+        body.appendChild(row);
+      });
+
+      if (history.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.className = "empty-state";
+        cell.textContent = "Aucun mouvement pour le moment.";
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
+    }
+
+    function resetForm() {
+      editingProduct = null;
+      setActiveMovementButton(null);
+      document.getElementById("productForm").reset();
+      document.getElementById("threshold").value = 10;
+      document.getElementById("unitPrice").value = 0;
+      document.getElementById("formTitle").textContent = "Enregistrer un mouvement";
+      document.getElementById("cancelEditButton").classList.add("hidden");
+      document.getElementById("formMessage").textContent = "";
+      document.getElementById("name").disabled = false;
+    }
+
+    function startEdit(key) {
+      const product = products[key];
+      if (!product) return;
+
+      editingProduct = key;
+      document.getElementById("name").value = product.name;
+      document.getElementById("name").disabled = true;
+      document.getElementById("category").value = product.category;
+      document.getElementById("movement").value = "in";
+      document.getElementById("quantity").value = 1;
+      document.getElementById("threshold").value = product.threshold;
+      document.getElementById("unitPrice").value = product.unitPrice;
+      document.getElementById("note").value = "Ajustement manuel";
+      document.getElementById("formTitle").textContent = "Mouvement sur produit";
+      document.getElementById("cancelEditButton").classList.remove("hidden");
+    }
+
+    async function deleteProduct(key) {
+      if (!canDeleteProduct()) return;
+
+      const product = products[key];
+      if (!product) return;
+
+      const confirmed = confirm(`Supprimer le produit "${product.name}" de l'inventaire ?`);
+      if (!confirmed) return;
+
+      const response = await fetch(`/api/products/${encodeURIComponent(key)}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": decodeURIComponent(csrfToken()) }
+      });
+
+      if (!response.ok) {
+        document.getElementById("formMessage").textContent = response.status === 403
+          ? "Suppression reservee a l'administrateur."
+          : "Suppression impossible.";
+        return;
+      }
+
+      delete products[key];
+      addHistory({ name: product.name, quantity: 0 }, "out", 0, "Produit supprime");
+      renderInventory();
+    }
+
+    async function handleSubmit(event) {
+      event.preventDefault();
+      if (!canWriteStock()) return;
+
+      const form = event.currentTarget;
+      const fields = form.elements;
+      const submitButton = event.submitter;
+      const name = editingProduct ? products[editingProduct].name : normalizeName(fields.name.value);
+      const key = editingProduct || productKey(name);
+      const category = fields.category.value;
+      const movement = fields.movement.value;
+      const quantity = Number(fields.quantity.value);
+      const threshold = Number(fields.threshold.value);
+      const unitPrice = Number(fields.unitPrice.value);
+      const note = fields.note.value.trim();
+      const message = document.getElementById("formMessage");
+
+      if (!name || quantity <= 0 || threshold < 0 || unitPrice < 0) {
+        message.textContent = "Veuillez verifier les informations saisies.";
+        return;
+      }
+
+      const product = products[key] || {
+        name,
+        category,
+        quantity: 0,
+        threshold,
+        unitPrice,
+        updatedAt: new Date().toISOString()
+      };
+
+      if (movement === "out" && quantity > product.quantity) {
+        message.textContent = "La sortie depasse le stock disponible.";
+        return;
+      }
+
+      product.category = category;
+      product.threshold = threshold;
+      product.unitPrice = unitPrice;
+      product.quantity += movement === "in" ? quantity : -quantity;
+      product.updatedAt = new Date().toISOString();
+      product.name = name;
+      products[key] = product;
+
+      setButtonWorking(submitButton, true);
+      addHistory(product, movement, quantity, note);
+      try {
+        const saved = await saveData();
+        if (!saved) return;
+
+        renderInventory();
+        resetForm();
+        message.textContent = "Mouvement enregistre avec succes.";
+      } finally {
+        setButtonWorking(submitButton, false);
+      }
+    }
+
+    function exportCSV() {
+      const rows = [
+        ["Produit", "Categorie", "Stock", "Seuil", "Prix unitaire", "Valeur", "Statut"]
+      ];
+
+      Object.values(products).forEach(product => {
+        rows.push([
+          product.name,
+          product.category,
+          product.quantity,
+          product.threshold,
+          product.unitPrice,
+          product.quantity * product.unitPrice,
+          productStatus(product)
+        ]);
+      });
+
+      function escapeCSVValue(value) {
+        const text = String(value);
+        const safeText = /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
+
+        return `"${safeText.replaceAll('"', '""')}"`;
+      }
+
+      const csv = rows
+        .map(row => row.map(escapeCSVValue).join(","))
+        .join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "inventaire-manford.csv";
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    async function seedExample() {
+      if (!canWriteStock()) return;
+
+      const seedButton = document.getElementById("seedButton");
+      const examples = [
+        { name: "Ciment gris", category: "Materiaux", quantity: 45, threshold: 15, unitPrice: 12 },
+        { name: "Casque de protection", category: "Equipement", quantity: 8, threshold: 10, unitPrice: 7.5 },
+        { name: "Huile vegetale", category: "Alimentation", quantity: 30, threshold: 12, unitPrice: 4 },
+        { name: "Farine de ble", category: "Alimentation", quantity: 60, threshold: 20, unitPrice: 2.2 }
+      ];
+      let addedCount = 0;
+
+      examples.forEach(item => {
+        const key = productKey(item.name);
+        if (products[key]) return;
+
+        products[key] = { ...item, updatedAt: new Date().toISOString() };
+        addHistory(products[key], "in", item.quantity, "Donnees de demonstration");
+        addedCount += 1;
+      });
+
+      setButtonWorking(seedButton, true);
+      try {
+        const saved = await saveData();
+        if (!saved) return;
+
+        renderInventory();
+
+        document.getElementById("formMessage").textContent = addedCount > 0
+          ? `${addedCount} produit(s) de demonstration ajoute(s).`
+          : "Les donnees de demonstration sont deja chargees.";
+      } finally {
+        setButtonWorking(seedButton, false);
+      }
+    }
+
+    async function init() {
+      await loadData();
+      migrateLocalData();
+      normalizeStoredProducts();
+      await saveData();
+      renderInventory();
+      applyRoleUI();
+
+      document.getElementById("productForm").addEventListener("submit", handleSubmit);
+      document.getElementById("searchInput").addEventListener("input", renderInventory);
+      document.getElementById("exportButton").addEventListener("click", event => {
+        flashButton(event.currentTarget);
+        exportCSV();
+      });
+      document.getElementById("seedButton").addEventListener("click", seedExample);
+      document.getElementById("cancelEditButton").addEventListener("click", resetForm);
+    }
+
+    init().catch(error => {
+      document.getElementById("formMessage").textContent = error.message;
+    });
+  </script>
+</body>
+</html>
