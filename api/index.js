@@ -1,3 +1,3 @@
-const { requestHandler } = require("../server");
+const requestHandler = require("../server");
 
 module.exports = requestHandler;

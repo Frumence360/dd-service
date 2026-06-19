@@ -943,7 +943,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = {
-  requestHandler,
-  startServer
-};
+module.exports = requestHandler;
