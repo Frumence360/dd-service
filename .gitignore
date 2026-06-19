@@ -1,5 +1,6 @@
 certs/
 data/backups/
+node_modules/
 .env
 *.log
 *.tmp

@@ -18,6 +18,8 @@ const SEED_DATA_FILE = path.join(DATA_DIR, "stock.json");
 const RUNTIME_DATA_DIR = IS_VERCEL ? path.join(os.tmpdir(), "dd-service-data") : DATA_DIR;
 const DATA_FILE = path.join(RUNTIME_DATA_DIR, "stock.json");
 const BACKUP_DIR = path.join(RUNTIME_DATA_DIR, "backups");
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const DATABASE_SSL = process.env.DATABASE_SSL !== "false";
 const USER_ENV_KEYS = [
   { role: "admin", env: "ADMIN_PASSWORD_HASH" },
   { role: "magasinier", env: "MAGASINIER_PASSWORD_HASH" },
@@ -34,6 +36,8 @@ const loginAttempts = new Map();
 const ALLOWED_CATEGORIES = new Set(["Materiaux", "Alimentation", "Equipement", "Autre"]);
 const PRODUCT_FIELDS = new Set(["name", "category", "quantity", "threshold", "unitPrice", "updatedAt"]);
 const HISTORY_FIELDS = new Set(["date", "product", "type", "quantity", "remaining", "note"]);
+let pgPool = null;
+let databaseReadyPromise = null;
 
 function loadEnvFile() {
   const envFile = path.join(ROOT, ".env");
@@ -392,6 +396,202 @@ function validateStockPayload(data) {
   };
 }
 
+function useDatabase() {
+  return Boolean(DATABASE_URL);
+}
+
+function getPgPool() {
+  if (pgPool) return pgPool;
+
+  let Pool;
+  try {
+    ({ Pool } = require("pg"));
+  } catch {
+    throw new Error("Le module PostgreSQL est manquant. Lance npm install avant d'utiliser DATABASE_URL.");
+  }
+
+  pgPool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: DATABASE_SSL ? { rejectUnauthorized: false } : false
+  });
+
+  return pgPool;
+}
+
+async function queryDatabase(text, params = []) {
+  const pool = getPgPool();
+  return pool.query(text, params);
+}
+
+function productFromRow(row) {
+  return {
+    name: row.name,
+    category: row.category,
+    quantity: Number(row.quantity),
+    threshold: Number(row.threshold),
+    unitPrice: Number(row.unit_price),
+    updatedAt: new Date(row.updated_at).toISOString()
+  };
+}
+
+function historyFromRow(row) {
+  return {
+    date: new Date(row.date).toISOString(),
+    product: row.product,
+    type: row.type,
+    quantity: Number(row.quantity),
+    remaining: Number(row.remaining),
+    note: row.note || ""
+  };
+}
+
+async function ensureDatabase() {
+  if (!useDatabase()) return;
+
+  if (!databaseReadyPromise) {
+    databaseReadyPromise = (async () => {
+      await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS products (
+          key TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          category TEXT NOT NULL,
+          quantity INTEGER NOT NULL CHECK (quantity >= 0),
+          threshold INTEGER NOT NULL CHECK (threshold >= 0),
+          unit_price NUMERIC(14, 2) NOT NULL CHECK (unit_price >= 0),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+
+      await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS history (
+          id BIGSERIAL PRIMARY KEY,
+          date TIMESTAMPTZ NOT NULL DEFAULT now(),
+          product TEXT NOT NULL,
+          type TEXT NOT NULL CHECK (type IN ('Entree', 'Sortie')),
+          quantity INTEGER NOT NULL CHECK (quantity >= 0),
+          remaining INTEGER NOT NULL CHECK (remaining >= 0),
+          note TEXT NOT NULL DEFAULT ''
+        )
+      `);
+
+      const count = await queryDatabase("SELECT COUNT(*)::int AS count FROM products");
+      if (count.rows[0].count === 0 && fs.existsSync(SEED_DATA_FILE)) {
+        const seed = validateStockPayload(JSON.parse(fs.readFileSync(SEED_DATA_FILE, "utf8")));
+        await writeStockToDatabase(seed);
+      }
+    })();
+  }
+
+  await databaseReadyPromise;
+}
+
+async function readStockFromDatabase() {
+  await ensureDatabase();
+
+  const [productResult, historyResult] = await Promise.all([
+    queryDatabase("SELECT * FROM products ORDER BY name ASC"),
+    queryDatabase(`
+      SELECT date, product, type, quantity, remaining, note
+      FROM (
+        SELECT id, date, product, type, quantity, remaining, note
+        FROM history
+        ORDER BY date DESC, id DESC
+        LIMIT 200
+      ) recent
+      ORDER BY date ASC, id ASC
+    `)
+  ]);
+
+  const products = {};
+  productResult.rows.forEach(row => {
+    const product = productFromRow(row);
+    products[row.key] = product;
+  });
+
+  return {
+    products,
+    history: historyResult.rows.map(historyFromRow)
+  };
+}
+
+async function writeStockToDatabase(data) {
+  const payload = validateStockPayload(data);
+  const pool = getPgPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("TRUNCATE TABLE history RESTART IDENTITY");
+    await client.query("DELETE FROM products");
+
+    for (const [key, product] of Object.entries(payload.products)) {
+      await client.query(`
+        INSERT INTO products (key, name, category, quantity, threshold, unit_price, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [
+        key,
+        product.name,
+        product.category,
+        product.quantity,
+        product.threshold,
+        product.unitPrice,
+        product.updatedAt
+      ]);
+    }
+
+    for (const item of payload.history) {
+      await client.query(`
+        INSERT INTO history (date, product, type, quantity, remaining, note)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [
+        item.date,
+        item.product,
+        item.type,
+        item.quantity,
+        item.remaining,
+        item.note
+      ]);
+    }
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function deleteProductFromDatabase(key) {
+  await ensureDatabase();
+  const pool = getPgPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const productResult = await client.query("DELETE FROM products WHERE key = $1 RETURNING *", [key]);
+
+    if (productResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+
+    const product = productFromRow(productResult.rows[0]);
+    await client.query(`
+      INSERT INTO history (date, product, type, quantity, remaining, note)
+      VALUES ($1, $2, 'Sortie', 0, 0, 'Produit supprime')
+    `, [new Date().toISOString(), product.name]);
+
+    await client.query("COMMIT");
+    return true;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -414,7 +614,7 @@ function readBody(request) {
   });
 }
 
-function readStock() {
+function readStockFile() {
   ensureDataFile();
   const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
 
@@ -424,7 +624,7 @@ function readStock() {
   };
 }
 
-function writeStock(data) {
+function writeStockFile(data) {
   ensureDataFile();
   const payload = validateStockPayload(data);
   const tempFile = `${DATA_FILE}.tmp`;
@@ -432,6 +632,21 @@ function writeStock(data) {
   backupStockFile();
   fs.writeFileSync(tempFile, JSON.stringify(payload, null, 2));
   fs.renameSync(tempFile, DATA_FILE);
+}
+
+async function readStock() {
+  if (useDatabase()) return readStockFromDatabase();
+  return readStockFile();
+}
+
+async function writeStock(data) {
+  if (useDatabase()) {
+    await ensureDatabase();
+    await writeStockToDatabase(data);
+    return;
+  }
+
+  writeStockFile(data);
 }
 
 function requireSession(request, response) {
@@ -540,7 +755,7 @@ async function handleApi(request, response, pathname) {
     }
 
     if (request.method === "GET") {
-      sendJson(response, 200, readStock());
+      sendJson(response, 200, await readStock());
       return;
     }
 
@@ -553,7 +768,7 @@ async function handleApi(request, response, pathname) {
       if (!requireCsrf(request, response, session)) return;
 
       try {
-        writeStock(await readBody(request));
+        await writeStock(await readBody(request));
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message || "Donnees invalides" });
@@ -578,7 +793,22 @@ async function handleApi(request, response, pathname) {
       if (!requireCsrf(request, response, session)) return;
 
       const key = decodeURIComponent(pathname.slice("/api/products/".length));
-      const data = readStock();
+      if (useDatabase()) {
+        try {
+          const deleted = await deleteProductFromDatabase(key);
+          if (!deleted) {
+            sendJson(response, 404, { error: "Produit introuvable" });
+            return;
+          }
+
+          sendJson(response, 200, { ok: true });
+        } catch (error) {
+          sendJson(response, 500, { error: error.message || "Suppression impossible" });
+        }
+        return;
+      }
+
+      const data = await readStock();
       const product = data.products[key];
 
       if (!product) {
@@ -595,7 +825,7 @@ async function handleApi(request, response, pathname) {
         remaining: 0,
         note: "Produit supprime"
       });
-      writeStock(data);
+      await writeStock(data);
       sendJson(response, 200, { ok: true });
       return;
     }
@@ -681,8 +911,13 @@ function createServer() {
   });
 }
 
-function startServer() {
-  ensureDataFile();
+async function startServer() {
+  if (useDatabase()) {
+    await ensureDatabase();
+  } else {
+    ensureDataFile();
+  }
+
   const activeServer = createServer();
   activeServer.on("error", error => {
     if (error.code === "EADDRINUSE") {
@@ -702,7 +937,10 @@ function startServer() {
 }
 
 if (require.main === module) {
-  startServer();
+  startServer().catch(error => {
+    console.error("Demarrage impossible:", error.message);
+    process.exit(1);
+  });
 }
 
 module.exports = {
