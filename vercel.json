@@ -2,10 +2,25 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "includeFiles": "**/*"
+      "includeFiles": "data/stock.json"
     }
   },
   "routes": [
+    {
+      "src": "/",
+      "dest": "/index.html"
+    },
+    {
+      "src": "/data/(.*)",
+      "dest": "/api/index.js"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.js"
+    },
     {
       "src": "/(.*)",
       "dest": "/api/index.js"
