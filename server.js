@@ -545,6 +545,11 @@ async function ensureDatabase() {
           id BIGSERIAL PRIMARY KEY,
           name TEXT NOT NULL,
           slug TEXT NOT NULL UNIQUE,
+          address TEXT NOT NULL DEFAULT '',
+          phone TEXT NOT NULL DEFAULT '',
+          logo_url TEXT NOT NULL DEFAULT '',
+          currency TEXT NOT NULL DEFAULT 'USD',
+          default_threshold INTEGER NOT NULL DEFAULT 10 CHECK (default_threshold >= 0),
           active BOOLEAN NOT NULL DEFAULT TRUE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -558,6 +563,11 @@ async function ensureDatabase() {
         RETURNING id
       `, [DEFAULT_COMPANY_NAME, DEFAULT_COMPANY_SLUG]);
       defaultCompanyId = String(companyResult.rows[0].id);
+      await queryDatabase("ALTER TABLE companies ADD COLUMN IF NOT EXISTS address TEXT NOT NULL DEFAULT ''");
+      await queryDatabase("ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT ''");
+      await queryDatabase("ALTER TABLE companies ADD COLUMN IF NOT EXISTS logo_url TEXT NOT NULL DEFAULT ''");
+      await queryDatabase("ALTER TABLE companies ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD'");
+      await queryDatabase("ALTER TABLE companies ADD COLUMN IF NOT EXISTS default_threshold INTEGER NOT NULL DEFAULT 10");
 
       await queryDatabase(`
         CREATE TABLE IF NOT EXISTS products (
@@ -859,14 +869,21 @@ function companyFromRow(row) {
     id: String(row.id),
     name: row.name,
     slug: row.slug,
-    active: Boolean(row.active)
+    active: Boolean(row.active),
+    address: row.address || "",
+    phone: row.phone || "",
+    logoUrl: row.logo_url || "",
+    currency: row.currency || "USD",
+    defaultThreshold: Number(row.default_threshold) || 0
   };
 }
 
 async function readCompaniesForUser(userId) {
   await ensureDatabase();
   const result = await queryDatabase(`
-    SELECT companies.id, companies.name, companies.slug, companies.active
+    SELECT companies.id, companies.name, companies.slug, companies.address,
+           companies.phone, companies.logo_url, companies.currency,
+           companies.default_threshold, companies.active
     FROM companies
     INNER JOIN company_memberships
       ON company_memberships.company_id = companies.id
@@ -876,6 +893,64 @@ async function readCompaniesForUser(userId) {
     ORDER BY companies.name ASC
   `, [userId]);
   return result.rows.map(companyFromRow);
+}
+
+const COMPANY_CURRENCIES = new Set(["USD", "EUR", "CAD", "GBP", "CHF", "XOF"]);
+
+function validateCompanySettings(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Parametres d'entreprise invalides");
+  }
+  assertKnownFields(data, new Set(["name", "address", "phone", "logoUrl", "currency", "defaultThreshold"]), "Parametres");
+  const currency = String(data.currency || "").trim().toUpperCase();
+  if (!COMPANY_CURRENCIES.has(currency)) {
+    throw new Error("Entreprise.devise: devise non autorisee");
+  }
+  const logoUrl = String(data.logoUrl || "").trim();
+  if (logoUrl && !/^https?:\/\/[^\s]+$/i.test(logoUrl)) {
+    throw new Error("Entreprise.logo: URL invalide");
+  }
+  return {
+    name: validateCompanyName(data.name),
+    address: String(data.address || "").trim().slice(0, 240),
+    phone: String(data.phone || "").trim().slice(0, 40),
+    logoUrl: logoUrl.slice(0, 500),
+    currency,
+    defaultThreshold: assertFiniteNumber(data.defaultThreshold, "Entreprise.seuil", { integer: true })
+  };
+}
+
+async function readCompanySettings(companyId) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT id, name, slug, address, phone, logo_url, currency,
+           default_threshold, active
+    FROM companies
+    WHERE id = $1 AND active = TRUE
+  `, [companyId]);
+  if (result.rowCount === 0) return null;
+  return companyFromRow(result.rows[0]);
+}
+
+async function updateCompanySettings(companyId, settings) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    UPDATE companies
+    SET name = $1, address = $2, phone = $3, logo_url = $4,
+        currency = $5, default_threshold = $6, updated_at = now()
+    WHERE id = $7 AND active = TRUE
+    RETURNING id, name, slug, address, phone, logo_url, currency,
+              default_threshold, active
+  `, [
+    settings.name,
+    settings.address,
+    settings.phone,
+    settings.logoUrl,
+    settings.currency,
+    settings.defaultThreshold,
+    companyId
+  ]);
+  return result.rowCount > 0 ? companyFromRow(result.rows[0]) : null;
 }
 
 async function hasActiveCompanyMembership(userId, companyId) {
@@ -1369,6 +1444,38 @@ async function handleApi(request, response, pathname) {
       companies: await readCompaniesForUser(session.userId),
       activeCompanyId: session.companyId
     });
+    return;
+  }
+
+  if (pathname === "/api/company/settings" && (request.method === "GET" || request.method === "PUT")) {
+    if (!useDatabase()) {
+      sendJson(response, 503, { error: "Les parametres d'entreprise necessitent DATABASE_URL." });
+      return;
+    }
+    const session = await requireActiveSession(request, response);
+    if (!session) return;
+    const settings = await readCompanySettings(session.companyId);
+    if (!settings) {
+      sendJson(response, 404, { error: "Entreprise introuvable." });
+      return;
+    }
+    if (request.method === "GET") {
+      sendJson(response, 200, { company: settings });
+      return;
+    }
+    if (!requireCsrf(request, response, session)) return;
+    const membership = await getCompanyMembership(session.userId, session.companyId);
+    if (!membership || membership.role !== "admin") {
+      sendJson(response, 403, { error: "Modification reservee a l'administrateur de cette entreprise." });
+      return;
+    }
+    try {
+      const payload = validateCompanySettings(await readBody(request));
+      const updated = await updateCompanySettings(session.companyId, payload);
+      sendJson(response, 200, { company: updated });
+    } catch (error) {
+      sendJson(response, 400, { error: error.message || "Modification des parametres impossible." });
+    }
     return;
   }
 

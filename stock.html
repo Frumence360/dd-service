@@ -163,6 +163,50 @@
       </article>
     </section>
 
+    <section class="panel company-settings hidden" id="companySettings" aria-labelledby="companySettingsTitle">
+      <div class="panel-heading">
+        <div>
+          <h2 id="companySettingsTitle">Parametres de l'entreprise</h2>
+          <p>Informations affichees pour l'entreprise active et regles par defaut du stock.</p>
+        </div>
+      </div>
+      <form id="companySettingsForm" class="user-form">
+        <div class="form-row">
+          <div>
+            <label for="companyName">Nom officiel</label>
+            <input id="companyName" name="name" type="text" minlength="2" maxlength="120" required>
+          </div>
+          <div>
+            <label for="companyPhone">Telephone</label>
+            <input id="companyPhone" name="phone" type="tel" maxlength="40">
+          </div>
+        </div>
+        <label for="companyAddress">Adresse</label>
+        <input id="companyAddress" name="address" type="text" maxlength="240">
+        <label for="companyLogoUrl">Logo (URL https)</label>
+        <input id="companyLogoUrl" name="logoUrl" type="url" maxlength="500" placeholder="https://...">
+        <div class="form-row">
+          <div>
+            <label for="companyCurrency">Devise</label>
+            <select id="companyCurrency" name="currency" required>
+              <option value="USD">Dollar US (USD)</option>
+              <option value="EUR">Euro (EUR)</option>
+              <option value="CAD">Dollar canadien (CAD)</option>
+              <option value="GBP">Livre sterling (GBP)</option>
+              <option value="CHF">Franc suisse (CHF)</option>
+              <option value="XOF">Franc CFA (XOF)</option>
+            </select>
+          </div>
+          <div>
+            <label for="companyThreshold">Seuil par defaut</label>
+            <input id="companyThreshold" name="defaultThreshold" type="number" min="0" step="1" required>
+          </div>
+        </div>
+        <button class="button primary" type="submit">Enregistrer les parametres</button>
+        <p class="form-message" id="companySettingsMessage" role="status"></p>
+      </form>
+    </section>
+
     <section class="panel user-management hidden" id="userManagement" aria-labelledby="userManagementTitle">
       <div class="panel-heading">
         <div>
@@ -293,9 +337,10 @@
     let members = [];
     let editingUser = null;
 
-    const currency = new Intl.NumberFormat("fr-FR", {
+    let currencyCode = "USD";
+    let currency = new Intl.NumberFormat("fr-FR", {
       style: "currency",
-      currency: "USD",
+      currency: currencyCode,
       maximumFractionDigits: 2
     });
 
@@ -350,6 +395,7 @@
       companies = Array.isArray(companyData.companies) ? companyData.companies : [];
       currentCompanyId = companyData.activeCompanyId || currentCompanyId;
       renderCompanySelector();
+      await loadCompanySettings();
 
       const response = await fetch("/api/stock");
       if (response.status === 401) {
@@ -414,6 +460,62 @@
 
     function canDeleteProduct() {
       return currentRole === "admin";
+    }
+
+    function applyCompanyCurrency(code) {
+      currencyCode = code || "USD";
+      currency = new Intl.NumberFormat("fr-FR", {
+        style: "currency",
+        currency: currencyCode,
+        maximumFractionDigits: 2
+      });
+      document.querySelector('label[for="unitPrice"]').textContent = `Prix unitaire ${currencyCode}`;
+    }
+
+    async function loadCompanySettings() {
+      const response = await fetch("/api/company/settings");
+      if (!response.ok) throw new Error("Impossible de charger les parametres de l'entreprise.");
+      const data = await response.json();
+      const company = data.company;
+      applyCompanyCurrency(company.currency);
+      document.querySelector(".brand-logo").src = company.logoUrl || "image/logos.jpg";
+      document.querySelector(".brand-logo").alt = company.name;
+      document.getElementById("threshold").value = company.defaultThreshold;
+      document.getElementById("companyName").value = company.name;
+      document.getElementById("companyAddress").value = company.address || "";
+      document.getElementById("companyPhone").value = company.phone || "";
+      document.getElementById("companyLogoUrl").value = company.logoUrl || "";
+      document.getElementById("companyCurrency").value = company.currency;
+      document.getElementById("companyThreshold").value = company.defaultThreshold;
+      document.getElementById("companySettings").classList.toggle("hidden", !canManageUsers());
+    }
+
+    async function saveCompanySettings(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const message = document.getElementById("companySettingsMessage");
+      const body = Object.fromEntries(new FormData(form).entries());
+      body.defaultThreshold = Number(body.defaultThreshold);
+      try {
+        const response = await fetch("/api/company/settings", {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": decodeURIComponent(csrfToken())
+          },
+          body: JSON.stringify(body)
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Enregistrement impossible.");
+        applyCompanyCurrency(data.company.currency);
+        companies = companies.map(company => String(company.id) === String(data.company.id)
+          ? { ...company, ...data.company }
+          : company);
+        renderCompanySelector();
+        message.textContent = "Parametres enregistres.";
+      } catch (error) {
+        message.textContent = error.message;
+      }
     }
 
     function applyRoleUI() {
@@ -1238,6 +1340,7 @@
       document.getElementById("cancelUserEditButton").addEventListener("click", resetUserForm);
       document.getElementById("companyForm").addEventListener("submit", handleCompanySubmit);
       document.getElementById("memberForm").addEventListener("submit", handleMemberSubmit);
+      document.getElementById("companySettingsForm").addEventListener("submit", saveCompanySettings);
       await loadUsers();
       await loadCompanyMembers();
     }
