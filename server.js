@@ -32,12 +32,15 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_LOCK_MS = 1000 * 60 * 5;
 const COOKIE_SECURE = HTTPS_ENABLED || IS_VERCEL || process.env.COOKIE_SECURE === "true";
+const DEFAULT_COMPANY_NAME = "DD Service";
+const DEFAULT_COMPANY_SLUG = "dd-service";
 const loginAttempts = new Map();
 const ALLOWED_CATEGORIES = new Set(["Materiaux", "Alimentation", "Equipement", "Autre"]);
 const PRODUCT_FIELDS = new Set(["name", "category", "quantity", "threshold", "unitPrice", "updatedAt"]);
 const HISTORY_FIELDS = new Set(["date", "product", "type", "quantity", "remaining", "note"]);
 let pgPool = null;
 let databaseReadyPromise = null;
+let defaultCompanyId = null;
 const USER_ROLES = new Set(["admin", "magasinier", "lecture"]);
 const USERNAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N} ._'-]{2,79}$/u;
 
@@ -538,6 +541,25 @@ async function ensureDatabase() {
   if (!databaseReadyPromise) {
     databaseReadyPromise = (async () => {
       await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS companies (
+          id BIGSERIAL PRIMARY KEY,
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL UNIQUE,
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+
+      const companyResult = await queryDatabase(`
+        INSERT INTO companies (name, slug)
+        VALUES ($1, $2)
+        ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+        RETURNING id
+      `, [DEFAULT_COMPANY_NAME, DEFAULT_COMPANY_SLUG]);
+      defaultCompanyId = String(companyResult.rows[0].id);
+
+      await queryDatabase(`
         CREATE TABLE IF NOT EXISTS products (
           key TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -561,6 +583,34 @@ async function ensureDatabase() {
         )
       `);
 
+      await queryDatabase("ALTER TABLE products ADD COLUMN IF NOT EXISTS company_id BIGINT");
+      await queryDatabase("ALTER TABLE history ADD COLUMN IF NOT EXISTS company_id BIGINT");
+      await queryDatabase("UPDATE products SET company_id = $1 WHERE company_id IS NULL", [defaultCompanyId]);
+      await queryDatabase("UPDATE history SET company_id = $1 WHERE company_id IS NULL", [defaultCompanyId]);
+      await queryDatabase(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'products_company_id_fkey'
+          ) THEN
+            ALTER TABLE products
+              ADD CONSTRAINT products_company_id_fkey
+              FOREIGN KEY (company_id) REFERENCES companies(id);
+          END IF;
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'history_company_id_fkey'
+          ) THEN
+            ALTER TABLE history
+              ADD CONSTRAINT history_company_id_fkey
+              FOREIGN KEY (company_id) REFERENCES companies(id);
+          END IF;
+        END $$;
+      `);
+      await queryDatabase("ALTER TABLE products ALTER COLUMN company_id SET NOT NULL");
+      await queryDatabase("ALTER TABLE history ALTER COLUMN company_id SET NOT NULL");
+      await queryDatabase("CREATE INDEX IF NOT EXISTS products_company_id_idx ON products (company_id)");
+      await queryDatabase("CREATE INDEX IF NOT EXISTS history_company_id_date_idx ON history (company_id, date DESC)");
+
       await queryDatabase(`
         CREATE TABLE IF NOT EXISTS users (
           id BIGSERIAL PRIMARY KEY,
@@ -572,6 +622,29 @@ async function ensureDatabase() {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )
       `);
+
+      await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS company_memberships (
+          id BIGSERIAL PRIMARY KEY,
+          company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+          user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (role IN ('admin', 'magasinier', 'lecture')),
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE (company_id, user_id)
+        )
+      `);
+      await queryDatabase(`
+        INSERT INTO company_memberships (company_id, user_id, role)
+        SELECT $1, id, role
+        FROM users
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM company_memberships membership
+          WHERE membership.company_id = $1 AND membership.user_id = users.id
+        )
+      `, [defaultCompanyId]);
 
       const count = await queryDatabase("SELECT COUNT(*)::int AS count FROM products");
       if (count.rows[0].count === 0 && fs.existsSync(SEED_DATA_FILE)) {
@@ -625,8 +698,8 @@ async function writeStockToDatabase(data) {
 
     for (const [key, product] of Object.entries(payload.products)) {
       await client.query(`
-        INSERT INTO products (key, name, category, quantity, threshold, unit_price, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO products (key, name, category, quantity, threshold, unit_price, updated_at, company_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       `, [
         key,
         product.name,
@@ -634,21 +707,23 @@ async function writeStockToDatabase(data) {
         product.quantity,
         product.threshold,
         product.unitPrice,
-        product.updatedAt
+        product.updatedAt,
+        defaultCompanyId
       ]);
     }
 
     for (const item of payload.history) {
       await client.query(`
-        INSERT INTO history (date, product, type, quantity, remaining, note)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO history (date, product, type, quantity, remaining, note, company_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
       `, [
         item.date,
         item.product,
         item.type,
         item.quantity,
         item.remaining,
-        item.note
+        item.note,
+        defaultCompanyId
       ]);
     }
 
@@ -677,9 +752,9 @@ async function deleteProductFromDatabase(key) {
 
     const product = productFromRow(productResult.rows[0]);
     await client.query(`
-      INSERT INTO history (date, product, type, quantity, remaining, note)
-      VALUES ($1, $2, 'Sortie', 0, 0, 'Produit supprime')
-    `, [new Date().toISOString(), product.name]);
+      INSERT INTO history (date, product, type, quantity, remaining, note, company_id)
+      VALUES ($1, $2, 'Sortie', 0, 0, 'Produit supprime', $3)
+    `, [new Date().toISOString(), product.name, defaultCompanyId]);
 
     await client.query("COMMIT");
     return true;
@@ -811,6 +886,10 @@ async function createUserInDatabase(payload) {
     VALUES ($1, $2, $3)
     RETURNING id, username, role, active, created_at, updated_at
   `, [payload.username, payload.role, hashPassword(payload.password)]);
+  await queryDatabase(`
+    INSERT INTO company_memberships (company_id, user_id, role)
+    VALUES ($1, $2, $3)
+  `, [defaultCompanyId, result.rows[0].id, payload.role]);
   return userFromRow(result.rows[0]);
 }
 
@@ -848,6 +927,24 @@ async function updateUserInDatabase(id, payload) {
     WHERE id = $${params.length}
     RETURNING id, username, role, active, created_at, updated_at
   `, params);
+  if (payload.role !== undefined || payload.active !== undefined) {
+    const membershipFields = [];
+    const membershipParams = [];
+    if (payload.role !== undefined) {
+      membershipParams.push(payload.role);
+      membershipFields.push(`role = $${membershipParams.length}`);
+    }
+    if (payload.active !== undefined) {
+      membershipParams.push(payload.active);
+      membershipFields.push(`active = $${membershipParams.length}`);
+    }
+    membershipParams.push(defaultCompanyId, id);
+    await queryDatabase(`
+      UPDATE company_memberships
+      SET ${membershipFields.join(", ")}, updated_at = now()
+      WHERE company_id = $${membershipParams.length - 1} AND user_id = $${membershipParams.length}
+    `, membershipParams);
+  }
   return result.rows[0] ? userFromRow(result.rows[0]) : null;
 }
 
