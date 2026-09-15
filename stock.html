@@ -215,6 +215,67 @@
         </table>
       </div>
     </section>
+
+    <section class="panel user-management hidden" id="companyManagement" aria-labelledby="companyManagementTitle">
+      <div class="panel-heading">
+        <div>
+          <h2 id="companyManagementTitle">Entreprises et accès</h2>
+          <p>Créez une entreprise puis rattachez les comptes autorisés à son espace.</p>
+        </div>
+      </div>
+
+      <form id="companyForm" class="user-form">
+        <h3>Créer une entreprise</h3>
+        <div class="form-row">
+          <div>
+            <label for="companyName">Nom de l'entreprise</label>
+            <input id="companyName" name="name" type="text" minlength="2" maxlength="120"
+              required placeholder="Ex. Atelier Plus">
+          </div>
+          <div>
+            <label for="companySlug">Identifiant web</label>
+            <input id="companySlug" name="slug" type="text" maxlength="80"
+              placeholder="Ex. atelier-plus">
+          </div>
+        </div>
+        <button class="button primary" type="submit">Créer l'entreprise</button>
+        <p class="form-message" id="companyFormMessage" role="status"></p>
+      </form>
+
+      <form id="memberForm" class="user-form">
+        <h3>Rattacher un compte à l'entreprise active</h3>
+        <div class="form-row">
+          <div>
+            <label for="memberUser">Compte</label>
+            <select id="memberUser" name="userId" required></select>
+          </div>
+          <div>
+            <label for="memberRole">Rôle dans cette entreprise</label>
+            <select id="memberRole" name="role" required>
+              <option value="admin">Administrateur</option>
+              <option value="magasinier">Magasinier</option>
+              <option value="lecture">Lecture seule</option>
+            </select>
+          </div>
+        </div>
+        <button class="button secondary" type="submit">Rattacher le compte</button>
+        <p class="form-message" id="memberFormMessage" role="status"></p>
+      </form>
+
+      <div class="table-wrap user-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Compte</th>
+              <th>Rôle</th>
+              <th>État</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="membersBody"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -228,6 +289,7 @@
     let currentCompanyId = null;
     let companies = [];
     let users = [];
+    let members = [];
     let editingUser = null;
 
     const currency = new Intl.NumberFormat("fr-FR", {
@@ -465,6 +527,145 @@
         renderUsers();
       } catch (error) {
         document.getElementById("userFormMessage").textContent = error.message;
+      }
+    }
+
+    function renderMemberUsers() {
+      const select = document.getElementById("memberUser");
+      select.replaceChildren();
+      users.forEach(user => {
+        const option = document.createElement("option");
+        option.value = user.id;
+        option.textContent = `${user.username} (${roleLabel(user.role)})`;
+        select.appendChild(option);
+      });
+      select.disabled = users.length === 0;
+    }
+
+    function renderMembers() {
+      const body = document.getElementById("membersBody");
+      body.replaceChildren();
+      if (members.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 4;
+        cell.className = "empty-state";
+        cell.textContent = "Aucun compte rattaché à cette entreprise.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      members.forEach(member => {
+        const row = document.createElement("tr");
+        [member.username, roleLabel(member.role), member.active ? "Actif" : "Désactivé"]
+          .forEach(value => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.appendChild(cell);
+          });
+        const actions = document.createElement("td");
+        const toggle = document.createElement("button");
+        toggle.className = "table-action";
+        toggle.type = "button";
+        toggle.textContent = member.active ? "Désactiver" : "Activer";
+        toggle.addEventListener("click", () => toggleMember(member));
+        const remove = document.createElement("button");
+        remove.className = "table-action danger-text";
+        remove.type = "button";
+        remove.textContent = "Retirer";
+        remove.addEventListener("click", () => removeMember(member));
+        actions.append(toggle, remove);
+        row.appendChild(actions);
+        body.appendChild(row);
+      });
+    }
+
+    async function loadCompanyMembers() {
+      if (!canManageUsers() || !currentCompanyId) return;
+      const section = document.getElementById("companyManagement");
+      section.classList.remove("hidden");
+      renderMemberUsers();
+      try {
+        const data = await userRequest(`/api/companies/${encodeURIComponent(currentCompanyId)}/members`);
+        members = Array.isArray(data.members) ? data.members : [];
+        renderMembers();
+      } catch (error) {
+        document.getElementById("memberFormMessage").textContent = error.message;
+      }
+    }
+
+    async function handleCompanySubmit(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const message = document.getElementById("companyFormMessage");
+      try {
+        const data = await userRequest("/api/companies", {
+          method: "POST",
+          body: JSON.stringify({
+            name: form.elements.name.value,
+            slug: form.elements.slug.value
+          })
+        });
+        companies.push(data.company);
+        companies.sort((a, b) => a.name.localeCompare(b.name));
+        renderCompanySelector();
+        form.reset();
+        message.textContent = "Entreprise créée. Changez d'espace depuis le sélecteur.";
+      } catch (error) {
+        message.textContent = error.message;
+      }
+    }
+
+    async function handleMemberSubmit(event) {
+      event.preventDefault();
+      if (!currentCompanyId) return;
+      const form = event.currentTarget;
+      try {
+        const data = await userRequest(
+          `/api/companies/${encodeURIComponent(currentCompanyId)}/members`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              userId: form.elements.userId.value,
+              role: form.elements.role.value
+            })
+          }
+        );
+        members = Array.isArray(data.members) ? data.members : [];
+        renderMembers();
+        document.getElementById("memberFormMessage").textContent = "Compte rattaché.";
+      } catch (error) {
+        document.getElementById("memberFormMessage").textContent = error.message;
+      }
+    }
+
+    async function toggleMember(member) {
+      try {
+        const data = await userRequest(
+          `/api/companies/${encodeURIComponent(currentCompanyId)}/members/${encodeURIComponent(member.id)}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({ active: !member.active })
+          }
+        );
+        members = Array.isArray(data.members) ? data.members : [];
+        renderMembers();
+      } catch (error) {
+        document.getElementById("memberFormMessage").textContent = error.message;
+      }
+    }
+
+    async function removeMember(member) {
+      if (!confirm(`Retirer "${member.username}" de cette entreprise ?`)) return;
+      try {
+        await userRequest(
+          `/api/companies/${encodeURIComponent(currentCompanyId)}/members/${encodeURIComponent(member.id)}`,
+          { method: "DELETE" }
+        );
+        members = members.filter(item => item.id !== member.id);
+        renderMembers();
+      } catch (error) {
+        document.getElementById("memberFormMessage").textContent = error.message;
       }
     }
 
@@ -1033,7 +1234,10 @@
       document.getElementById("companySelect").addEventListener("change", changeCompany);
       document.getElementById("userForm").addEventListener("submit", handleUserSubmit);
       document.getElementById("cancelUserEditButton").addEventListener("click", resetUserForm);
+      document.getElementById("companyForm").addEventListener("submit", handleCompanySubmit);
+      document.getElementById("memberForm").addEventListener("submit", handleMemberSubmit);
       await loadUsers();
+      await loadCompanyMembers();
     }
 
     init().catch(error => {

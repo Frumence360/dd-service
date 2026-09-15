@@ -869,6 +869,110 @@ function validateCompanyId(value) {
   return id;
 }
 
+function validateCompanyName(value) {
+  return assertText(value, "Entreprise.nom", { min: 2, max: 120 });
+}
+
+function validateCompanySlug(value) {
+  const slug = String(value || "").trim().toLocaleLowerCase("fr-FR");
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80) {
+    throw new Error("Entreprise.identifiant: format invalide");
+  }
+  return slug;
+}
+
+async function getCompanyMembership(userId, companyId) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT company_id, user_id, role, active
+    FROM company_memberships
+    WHERE company_id = $1 AND user_id = $2
+  `, [companyId, userId]);
+  return result.rows[0] || null;
+}
+
+async function requireCompanyAdmin(request, response, companyId) {
+  const session = await requireActiveSession(request, response);
+  if (!session) return null;
+  const membership = session.userId
+    ? await getCompanyMembership(session.userId, companyId)
+    : null;
+  if (!membership || !membership.active || membership.role !== "admin") {
+    sendJson(response, 403, { error: "Action reservee a l'administrateur de cette entreprise" });
+    return null;
+  }
+  return session;
+}
+
+async function createCompanyInDatabase(name, slug, userId) {
+  await ensureDatabase();
+  const client = await getPgPool().connect();
+  try {
+    await client.query("BEGIN");
+    const companyResult = await client.query(`
+      INSERT INTO companies (name, slug)
+      VALUES ($1, $2)
+      RETURNING id, name, slug, active
+    `, [name, slug]);
+    const company = companyFromRow(companyResult.rows[0]);
+    await client.query(`
+      INSERT INTO company_memberships (company_id, user_id, role)
+      VALUES ($1, $2, 'admin')
+    `, [company.id, userId]);
+    await client.query("COMMIT");
+    return company;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readCompanyMembers(companyId) {
+  const result = await queryDatabase(`
+    SELECT users.id, users.username, company_memberships.role,
+           company_memberships.active, company_memberships.updated_at
+    FROM company_memberships
+    INNER JOIN users ON users.id = company_memberships.user_id
+    WHERE company_memberships.company_id = $1
+    ORDER BY users.username ASC
+  `, [companyId]);
+  return result.rows.map(row => ({
+    id: String(row.id),
+    username: row.username,
+    role: row.role,
+    active: Boolean(row.active),
+    updatedAt: new Date(row.updated_at).toISOString()
+  }));
+}
+
+async function addCompanyMember(companyId, userId, role) {
+  const result = await queryDatabase(`
+    INSERT INTO company_memberships (company_id, user_id, role)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (company_id, user_id)
+    DO UPDATE SET role = EXCLUDED.role, active = TRUE, updated_at = now()
+    RETURNING company_id, user_id, role, active, updated_at
+  `, [companyId, userId, role]);
+  return result.rows[0];
+}
+
+async function countCompanyAdmins(companyId, excludeUserId = null) {
+  const params = [companyId];
+  let query = `
+    SELECT COUNT(*)::int AS count
+    FROM company_memberships
+    WHERE company_id = $1 AND role = 'admin' AND active = TRUE
+  `;
+  if (excludeUserId !== null) {
+    params.push(excludeUserId);
+    query += " AND user_id <> $2";
+  }
+  const result = await queryDatabase(query, params);
+  return result.rows[0].count;
+}
+
 function setSessionCompany(response, session, companyId) {
   const token = createSessionToken({
     csrfToken: session.csrfToken,
@@ -898,29 +1002,12 @@ function accountManagementUnavailable(response) {
 }
 
 async function requireAdmin(request, response) {
-  const session = getSession(request);
-  if (!session) {
-    sendJson(response, 401, { error: "Non authentifie" });
-    return null;
-  }
-
+  const session = await requireActiveSession(request, response);
+  if (!session) return null;
   if (session.role !== "admin") {
     sendJson(response, 403, { error: "Gestion des comptes reservee a l'administrateur" });
     return null;
   }
-
-  if (useDatabase() && session.userId) {
-    const user = await findDatabaseUserById(session.userId);
-    if (!user || !user.active) {
-      sendJson(response, 401, { error: "Compte desactive ou introuvable" });
-      return null;
-    }
-    if (user.role !== "admin") {
-      sendJson(response, 403, { error: "Gestion des comptes reservee a l'administrateur" });
-      return null;
-    }
-  }
-
   return session;
 }
 
@@ -942,9 +1029,14 @@ async function requireActiveSession(request, response) {
       sendJson(response, 403, { error: "Accès à l'entreprise active refusé" });
       return null;
     }
+    const membership = await getCompanyMembership(session.userId, activeCompanyId);
+    if (!membership || !membership.active) {
+      sendJson(response, 403, { error: "Accès à l'entreprise active refusé" });
+      return null;
+    }
     return {
       ...session,
-      role: user.role,
+      role: membership.role,
       companyId: activeCompanyId
     };
   }
@@ -952,7 +1044,7 @@ async function requireActiveSession(request, response) {
   return session;
 }
 
-async function createUserInDatabase(payload) {
+async function createUserInDatabase(payload, companyId = defaultCompanyId) {
   await ensureDatabase();
   const duplicate = await queryDatabase(
     "SELECT 1 FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
@@ -971,11 +1063,11 @@ async function createUserInDatabase(payload) {
   await queryDatabase(`
     INSERT INTO company_memberships (company_id, user_id, role)
     VALUES ($1, $2, $3)
-  `, [defaultCompanyId, result.rows[0].id, payload.role]);
+  `, [companyId, result.rows[0].id, payload.role]);
   return userFromRow(result.rows[0]);
 }
 
-async function updateUserInDatabase(id, payload) {
+async function updateUserInDatabase(id, payload, companyId = defaultCompanyId) {
   await ensureDatabase();
   if (payload.username !== undefined) {
     const duplicate = await queryDatabase(
@@ -1020,7 +1112,7 @@ async function updateUserInDatabase(id, payload) {
       membershipParams.push(payload.active);
       membershipFields.push(`active = $${membershipParams.length}`);
     }
-    membershipParams.push(defaultCompanyId, id);
+    membershipParams.push(companyId, id);
     await queryDatabase(`
       UPDATE company_memberships
       SET ${membershipFields.join(", ")}, updated_at = now()
@@ -1126,9 +1218,12 @@ async function handleApi(request, response, pathname) {
       ? await findDatabaseUserById(session.userId)
       : null;
     const authenticated = Boolean(session && (!session.userId || (activeSession && activeSession.active)));
+    const activeMembership = authenticated && activeSession && (session.companyId || defaultCompanyId)
+      ? await getCompanyMembership(activeSession.id, session.companyId || defaultCompanyId)
+      : null;
     sendJson(response, 200, {
       authenticated,
-      role: authenticated ? (activeSession?.role || session?.role || null) : null,
+      role: authenticated ? (activeMembership?.role || activeSession?.role || session?.role || null) : null,
       companyId: authenticated
         ? (session.companyId || (useDatabase() ? defaultCompanyId : null))
         : null
@@ -1222,7 +1317,7 @@ async function handleApi(request, response, pathname) {
     return;
   }
 
-  if (pathname === "/api/companies") {
+  if (pathname === "/api/companies" && request.method === "GET") {
     const session = await requireActiveSession(request, response);
     if (!session) return;
 
@@ -1269,6 +1364,133 @@ async function handleApi(request, response, pathname) {
     return;
   }
 
+  if (pathname === "/api/companies" && request.method === "POST") {
+    if (!useDatabase()) {
+      accountManagementUnavailable(response);
+      return;
+    }
+    const session = await requireActiveSession(request, response);
+    if (!session) return;
+    const companyAdmin = session.companyId
+      ? await getCompanyMembership(session.userId, session.companyId)
+      : null;
+    if (!companyAdmin || companyAdmin.role !== "admin") {
+      sendJson(response, 403, { error: "Creation reservee a l'administrateur" });
+      return;
+    }
+    if (!requireCsrf(request, response, session)) return;
+
+    try {
+      const body = await readBody(request);
+      const name = validateCompanyName(body.name);
+      const slug = validateCompanySlug(body.slug || productKey(name).replace(/\s+/g, "-"));
+      const company = await createCompanyInDatabase(name, slug, session.userId);
+      sendJson(response, 201, { company });
+    } catch (error) {
+      sendJson(response, error.code === "23505" ? 409 : 400, {
+        error: error.code === "23505"
+          ? "Cet identifiant d'entreprise est deja utilise."
+          : error.message || "Creation de l'entreprise impossible"
+      });
+    }
+    return;
+  }
+
+  const companyMembersMatch = pathname.match(/^\/api\/companies\/([^/]+)\/members(?:\/([^/]+))?$/);
+  if (companyMembersMatch) {
+    if (!useDatabase()) {
+      accountManagementUnavailable(response);
+      return;
+    }
+    let companyId;
+    try {
+      companyId = validateCompanyId(safeDecodeURIComponent(companyMembersMatch[1]));
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+      return;
+    }
+    const session = await requireCompanyAdmin(request, response, companyId);
+    if (!session) return;
+
+    if (request.method === "GET" && !companyMembersMatch[2]) {
+      sendJson(response, 200, { members: await readCompanyMembers(companyId) });
+      return;
+    }
+
+    if (request.method === "POST" && !companyMembersMatch[2]) {
+      if (!requireCsrf(request, response, session)) return;
+      try {
+        const body = await readBody(request);
+        const userId = validateUserId(body.userId);
+        const role = validateUserRole(body.role);
+        const user = await findDatabaseUserById(userId);
+        if (!user || !user.active) {
+          sendJson(response, 404, { error: "Utilisateur introuvable ou desactive" });
+          return;
+        }
+        await addCompanyMember(companyId, userId, role);
+        sendJson(response, 200, { members: await readCompanyMembers(companyId) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message || "Rattachement impossible" });
+      }
+      return;
+    }
+
+    if (companyMembersMatch[2]) {
+      let userId;
+      try {
+        userId = validateUserId(safeDecodeURIComponent(companyMembersMatch[2]));
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+        return;
+      }
+      const membership = await getCompanyMembership(userId, companyId);
+      if (!membership) {
+        sendJson(response, 404, { error: "Membre introuvable" });
+        return;
+      }
+      if (request.method === "PATCH") {
+        if (!requireCsrf(request, response, session)) return;
+        try {
+          const body = await readBody(request);
+          const role = body.role === undefined ? membership.role : validateUserRole(body.role);
+          const active = body.active === undefined ? membership.active : body.active;
+          if (typeof active !== "boolean") throw new Error("Etat du membre invalide");
+          if (membership.role === "admin" && membership.active && (role !== "admin" || !active)
+              && await countCompanyAdmins(companyId, userId) === 0) {
+            sendJson(response, 400, { error: "Impossible de retirer le dernier administrateur." });
+            return;
+          }
+          await queryDatabase(`
+            UPDATE company_memberships
+            SET role = $1, active = $2, updated_at = now()
+            WHERE company_id = $3 AND user_id = $4
+          `, [role, active, companyId, userId]);
+          sendJson(response, 200, { members: await readCompanyMembers(companyId) });
+        } catch (error) {
+          sendJson(response, 400, { error: error.message || "Modification impossible" });
+        }
+        return;
+      }
+      if (request.method === "DELETE") {
+        if (!requireCsrf(request, response, session)) return;
+        if (membership.role === "admin" && membership.active
+            && await countCompanyAdmins(companyId, userId) === 0) {
+          sendJson(response, 400, { error: "Impossible de retirer le dernier administrateur." });
+          return;
+        }
+        await queryDatabase(
+          "DELETE FROM company_memberships WHERE company_id = $1 AND user_id = $2",
+          [companyId, userId]
+        );
+        sendJson(response, 200, { ok: true });
+        return;
+      }
+    }
+    sendJson(response, 405, { error: "Methode non autorisee" });
+    return;
+  }
+
   if (pathname === "/api/users" || pathname.startsWith("/api/users/")) {
     if (!useDatabase()) {
       accountManagementUnavailable(response);
@@ -1288,7 +1510,7 @@ async function handleApi(request, response, pathname) {
 
       try {
         const payload = validateUserPayload(await readBody(request));
-        const user = await createUserInDatabase(payload);
+        const user = await createUserInDatabase(payload, session.companyId);
         sendJson(response, 201, { user });
       } catch (error) {
         const status = error.code === "23505" ? 409 : 400;
@@ -1328,7 +1550,7 @@ async function handleApi(request, response, pathname) {
           }
         }
 
-        const updatedUser = await updateUserInDatabase(id, payload);
+        const updatedUser = await updateUserInDatabase(id, payload, session.companyId);
         sendJson(response, 200, { user: updatedUser });
       } catch (error) {
         const status = error.code === "23505" ? 409 : 400;
