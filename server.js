@@ -824,6 +824,24 @@ async function readAuditLogs(companyId, limit = 100) {
   }));
 }
 
+async function readStockReport(companyId, reportType) {
+  const stock = await readStock(companyId);
+  const products = Object.values(stock.products);
+  if (reportType === "inventory") return { products };
+  if (reportType === "low-stock") {
+    return { products: products.filter(product => product.quantity <= product.threshold) };
+  }
+  if (reportType === "stock-value") {
+    return {
+      currency: (await readCompanySettings(companyId))?.currency || "USD",
+      total: products.reduce((sum, product) => sum + product.quantity * product.unitPrice, 0),
+      products
+    };
+  }
+  if (reportType === "movements") return { history: stock.history };
+  throw new Error("Type de rapport invalide");
+}
+
 async function deleteProductFromDatabase(key, companyId = defaultCompanyId) {
   await ensureDatabase();
   const pool = getPgPool();
@@ -1501,6 +1519,18 @@ async function handleApi(request, response, pathname) {
     const session = await requireCompanyAdmin(request, response, getSession(request)?.companyId);
     if (!session) return;
     sendJson(response, 200, { logs: await readAuditLogs(session.companyId) });
+    return;
+  }
+
+  if (pathname.startsWith("/api/reports/") && request.method === "GET") {
+    const session = await requireActiveSession(request, response);
+    if (!session) return;
+    try {
+      const reportType = safeDecodeURIComponent(pathname.slice("/api/reports/"));
+      sendJson(response, 200, await readStockReport(session.companyId, reportType));
+    } catch (error) {
+      sendJson(response, 400, { error: error.message || "Rapport invalide" });
+    }
     return;
   }
 

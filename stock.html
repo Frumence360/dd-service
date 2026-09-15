@@ -207,6 +207,22 @@
       </form>
     </section>
 
+    <section class="panel reports-panel" aria-labelledby="reportsTitle">
+      <div class="panel-heading">
+        <div>
+          <h2 id="reportsTitle">Rapports et exports</h2>
+          <p>Analysez l'inventaire de l'entreprise active et exportez les donnees utiles.</p>
+        </div>
+        <div class="user-form-actions">
+          <button class="button secondary report-button" data-report="inventory" type="button">Inventaire CSV</button>
+          <button class="button secondary report-button" data-report="movements" type="button">Mouvements CSV</button>
+          <button class="button secondary report-button" data-report="low-stock" type="button">Stocks faibles</button>
+          <button class="button secondary report-button" data-report="stock-value" type="button">Valeur du stock</button>
+        </div>
+      </div>
+      <p class="form-message" id="reportMessage" role="status"></p>
+    </section>
+
     <section class="panel user-management hidden" id="auditManagement" aria-labelledby="auditTitle">
       <div class="panel-heading">
         <div>
@@ -547,6 +563,47 @@
         cell.textContent = "Aucune action enregistree.";
         row.appendChild(cell);
         body.appendChild(row);
+      }
+
+      function downloadReport(name, rows) {
+        const csv = rows.map(row => row.map(value => `"${String(value ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }));
+        link.download = `${name}-${new Date().toISOString().slice(0, 10)}.csv`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+      }
+
+      async function exportReport(type) {
+        const message = document.getElementById("reportMessage");
+        try {
+          const response = await fetch(`/api/reports/${encodeURIComponent(type)}`);
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Rapport indisponible.");
+          if (type === "inventory" || type === "low-stock" || type === "stock-value") {
+            downloadReport(type, [
+              ["Produit", "Categorie", "Stock", "Seuil", "Prix unitaire", "Valeur"],
+              ...data.products.map(product => [
+                product.name, product.category, product.quantity, product.threshold,
+                product.unitPrice, product.quantity * product.unitPrice
+              ])
+            ]);
+            message.textContent = type === "stock-value"
+              ? `Valeur totale : ${currency.format(data.total)}.`
+              : "Rapport exporte.";
+            return;
+          }
+          downloadReport("mouvements", [
+            ["Date", "Produit", "Type", "Quantite", "Restant", "Observation"],
+            ...data.history.map(item => [
+              new Date(item.date).toLocaleString("fr-FR"),
+              item.product, item.type, item.quantity, item.remaining, item.note
+            ])
+          ]);
+          message.textContent = "Rapport exporte.";
+        } catch (error) {
+          message.textContent = error.message;
+        }
       }
     }
 
@@ -1402,6 +1459,9 @@
       document.getElementById("memberForm").addEventListener("submit", handleMemberSubmit);
       document.getElementById("companySettingsForm").addEventListener("submit", saveCompanySettings);
       document.getElementById("refreshAuditButton").addEventListener("click", loadAuditLogs);
+      document.querySelectorAll(".report-button").forEach(button => {
+        button.addEventListener("click", () => exportReport(button.dataset.report));
+      });
       await loadUsers();
       await loadCompanyMembers();
       await loadAuditLogs();
