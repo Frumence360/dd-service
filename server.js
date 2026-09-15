@@ -72,7 +72,7 @@ const mimeTypes = {
 const securityHeaders = {
   "Content-Security-Policy": [
     "default-src 'self'",
-    "script-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self'",
@@ -143,6 +143,14 @@ function base64UrlDecode(value) {
   return Buffer.from(value, "base64url").toString("utf8");
 }
 
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function configuredUsers() {
   return USER_ENV_KEYS
     .map(user => ({ role: user.role, passwordHash: process.env[user.env] }))
@@ -170,12 +178,18 @@ function readSessionToken(token) {
   if (!payload || !signature) return null;
 
   const expectedSignature = sign(payload);
-  const validSignature = crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(expectedSignature)
-  );
+  if (signature.length !== expectedSignature.length) return null;
 
-  if (!validSignature) return null;
+  try {
+    const validSignature = crypto.timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expectedSignature)
+    );
+
+    if (!validSignature) return null;
+  } catch {
+    return null;
+  }
 
   try {
     return JSON.parse(base64UrlDecode(payload));
@@ -199,7 +213,7 @@ function parseCookies(request) {
       .map(cookie => {
         const index = cookie.indexOf("=");
         if (index === -1) return [cookie, ""];
-        return [cookie.slice(0, index), decodeURIComponent(cookie.slice(index + 1))];
+        return [cookie.slice(0, index), safeDecodeURIComponent(cookie.slice(index + 1))];
       })
   );
 }
@@ -792,7 +806,7 @@ async function handleApi(request, response, pathname) {
 
       if (!requireCsrf(request, response, session)) return;
 
-      const key = decodeURIComponent(pathname.slice("/api/products/".length));
+      const key = safeDecodeURIComponent(pathname.slice("/api/products/".length));
       if (useDatabase()) {
         try {
           const deleted = await deleteProductFromDatabase(key);
@@ -836,7 +850,8 @@ async function handleApi(request, response, pathname) {
 
 function serveStatic(request, response, pathname) {
   const filePath = pathname === "/" ? "/index.html" : pathname;
-  const resolved = path.resolve(ROOT, `.${decodeURIComponent(filePath)}`);
+  const safePath = safeDecodeURIComponent(filePath);
+  const resolved = path.resolve(ROOT, `.${safePath}`);
 
   if (!resolved.startsWith(ROOT) || resolved.startsWith(DATA_DIR)) {
     response.writeHead(403);
