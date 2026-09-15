@@ -658,6 +658,22 @@ async function ensureDatabase() {
         )
       `);
       await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id BIGSERIAL PRIMARY KEY,
+          company_id BIGINT REFERENCES companies(id) ON DELETE SET NULL,
+          actor_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+          action TEXT NOT NULL,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT,
+          metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+          ip_address INET,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await queryDatabase(
+        "CREATE INDEX IF NOT EXISTS audit_logs_company_date_idx ON audit_logs (company_id, created_at DESC)"
+      );
+      await queryDatabase(`
         INSERT INTO company_memberships (company_id, user_id, role)
         SELECT $1, id, role
         FROM users
@@ -757,6 +773,55 @@ async function writeStockToDatabase(data, companyId = defaultCompanyId) {
   } finally {
     client.release();
   }
+}
+
+async function writeAuditLog({
+  request,
+  companyId = null,
+  actorUserId = null,
+  action,
+  entityType,
+  entityId = null,
+  metadata = {}
+}) {
+  if (!useDatabase()) return;
+  await ensureDatabase();
+  await queryDatabase(`
+    INSERT INTO audit_logs
+      (company_id, actor_user_id, action, entity_type, entity_id, metadata, ip_address)
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+  `, [
+    companyId,
+    actorUserId,
+    action,
+    entityType,
+    entityId,
+    JSON.stringify(metadata),
+    request?.socket?.remoteAddress || null
+  ]);
+}
+
+async function readAuditLogs(companyId, limit = 100) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT audit_logs.id, audit_logs.action, audit_logs.entity_type,
+           audit_logs.entity_id, audit_logs.metadata, audit_logs.created_at,
+           users.username AS actor
+    FROM audit_logs
+    LEFT JOIN users ON users.id = audit_logs.actor_user_id
+    WHERE audit_logs.company_id = $1
+    ORDER BY audit_logs.created_at DESC, audit_logs.id DESC
+    LIMIT $2
+  `, [companyId, limit]);
+  return result.rows.map(row => ({
+    id: String(row.id),
+    action: row.action,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    metadata: row.metadata || {},
+    actor: row.actor || "Système",
+    createdAt: new Date(row.created_at).toISOString()
+  }));
 }
 
 async function deleteProductFromDatabase(key, companyId = defaultCompanyId) {
@@ -1428,6 +1493,17 @@ async function handleApi(request, response, pathname) {
     return;
   }
 
+  if (pathname === "/api/audit" && request.method === "GET") {
+    if (!useDatabase()) {
+      sendJson(response, 503, { error: "Le journal d'audit nécessite DATABASE_URL." });
+      return;
+    }
+    const session = await requireCompanyAdmin(request, response, getSession(request)?.companyId);
+    if (!session) return;
+    sendJson(response, 200, { logs: await readAuditLogs(session.companyId) });
+    return;
+  }
+
   if (pathname === "/api/companies" && request.method === "GET") {
     const session = await requireActiveSession(request, response);
     if (!session) return;
@@ -1472,6 +1548,19 @@ async function handleApi(request, response, pathname) {
     try {
       const payload = validateCompanySettings(await readBody(request));
       const updated = await updateCompanySettings(session.companyId, payload);
+      await writeAuditLog({
+        request,
+        companyId: session.companyId,
+        actorUserId: session.userId,
+        action: "company.settings.update",
+        entityType: "company",
+        entityId: session.companyId,
+        metadata: {
+          name: updated.name,
+          currency: updated.currency,
+          defaultThreshold: updated.defaultThreshold
+        }
+      });
       sendJson(response, 200, { company: updated });
     } catch (error) {
       sendJson(response, 400, { error: error.message || "Modification des parametres impossible." });
@@ -1500,6 +1589,14 @@ async function handleApi(request, response, pathname) {
       }
 
       setSessionCompany(response, session, companyId);
+      await writeAuditLog({
+        request,
+        companyId,
+        actorUserId: session.userId,
+        action: "company.switch",
+        entityType: "company",
+        entityId: companyId
+      });
       sendJson(response, 200, { ok: true, companyId });
     } catch (error) {
       sendJson(response, 400, { error: error.message || "Entreprise invalide" });
@@ -1528,6 +1625,15 @@ async function handleApi(request, response, pathname) {
       const name = validateCompanyName(body.name);
       const slug = validateCompanySlug(body.slug || productKey(name).replace(/\s+/g, "-"));
       const company = await createCompanyInDatabase(name, slug, session.userId);
+      await writeAuditLog({
+        request,
+        companyId: session.companyId,
+        actorUserId: session.userId,
+        action: "company.create",
+        entityType: "company",
+        entityId: company.id,
+        metadata: { name: company.name, slug: company.slug }
+      });
       sendJson(response, 201, { company });
     } catch (error) {
       sendJson(response, error.code === "23505" ? 409 : 400, {
@@ -1657,6 +1763,15 @@ async function handleApi(request, response, pathname) {
       try {
         const payload = validateUserPayload(await readBody(request));
         const user = await createUserInDatabase(payload, session.companyId);
+        await writeAuditLog({
+          request,
+          companyId: session.companyId,
+          actorUserId: session.userId,
+          action: "user.create",
+          entityType: "user",
+          entityId: user.id,
+          metadata: { username: user.username, role: user.role }
+        });
         sendJson(response, 201, { user });
       } catch (error) {
         const status = error.code === "23505" ? 409 : 400;
@@ -1711,6 +1826,15 @@ async function handleApi(request, response, pathname) {
         }
         const updatedUser = (await readUsersFromDatabase(session.companyId))
           .find(user => user.id === id);
+        await writeAuditLog({
+          request,
+          companyId: session.companyId,
+          actorUserId: session.userId,
+          action: "user.update",
+          entityType: "user",
+          entityId: id,
+          metadata: { role: updatedUser?.role, active: updatedUser?.active }
+        });
         sendJson(response, 200, { user: updatedUser });
       } catch (error) {
         const status = error.code === "23505" ? 409 : 400;
@@ -1736,6 +1860,14 @@ async function handleApi(request, response, pathname) {
         "DELETE FROM company_memberships WHERE company_id = $1 AND user_id = $2",
         [session.companyId, id]
       );
+      await writeAuditLog({
+        request,
+        companyId: session.companyId,
+        actorUserId: session.userId,
+        action: "user.delete",
+        entityType: "user",
+        entityId: id
+      });
       sendJson(response, 200, { ok: true });
       return;
     }
@@ -1760,6 +1892,14 @@ async function handleApi(request, response, pathname) {
 
       try {
         await writeStock(await readBody(request), session.companyId);
+        await writeAuditLog({
+          request,
+          companyId: session.companyId,
+          actorUserId: session.userId,
+          action: "stock.update",
+          entityType: "stock",
+          metadata: { role: session.role }
+        });
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message || "Donnees invalides" });
@@ -1789,6 +1929,14 @@ async function handleApi(request, response, pathname) {
             return;
           }
 
+          await writeAuditLog({
+            request,
+            companyId: session.companyId,
+            actorUserId: session.userId,
+            action: "product.delete",
+            entityType: "product",
+            entityId: key
+          });
           sendJson(response, 200, { ok: true });
         } catch (error) {
           sendJson(response, 500, { error: error.message || "Suppression impossible" });

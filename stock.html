@@ -207,6 +207,30 @@
       </form>
     </section>
 
+    <section class="panel user-management hidden" id="auditManagement" aria-labelledby="auditTitle">
+      <div class="panel-heading">
+        <div>
+          <h2 id="auditTitle">Journal d'audit</h2>
+          <p>Suivi des actions importantes realisees dans l'entreprise active.</p>
+        </div>
+        <button class="button secondary" id="refreshAuditButton" type="button">Actualiser</button>
+      </div>
+      <div class="table-wrap user-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Utilisateur</th>
+              <th>Action</th>
+              <th>Objet</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="auditBody"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel user-management hidden" id="userManagement" aria-labelledby="userManagementTitle">
       <div class="panel-heading">
         <div>
@@ -488,6 +512,42 @@
       document.getElementById("companyCurrency").value = company.currency;
       document.getElementById("companyThreshold").value = company.defaultThreshold;
       document.getElementById("companySettings").classList.toggle("hidden", !canManageUsers());
+    }
+
+    async function loadAuditLogs() {
+      const section = document.getElementById("auditManagement");
+      section.classList.toggle("hidden", !canManageUsers());
+      if (!canManageUsers()) return;
+      const response = await fetch("/api/audit");
+      if (!response.ok) throw new Error("Impossible de charger le journal d'audit.");
+      const data = await response.json();
+      const body = document.getElementById("auditBody");
+      body.replaceChildren();
+      data.logs.forEach(log => {
+        const row = document.createElement("tr");
+        const values = [
+          new Date(log.createdAt).toLocaleString("fr-FR"),
+          log.actor,
+          log.action,
+          `${log.entityType}${log.entityId ? ` #${log.entityId}` : ""}`,
+          JSON.stringify(log.metadata)
+        ];
+        values.forEach(value => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        });
+        body.appendChild(row);
+      });
+      if (data.logs.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.className = "empty-state";
+        cell.textContent = "Aucune action enregistree.";
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
     }
 
     async function saveCompanySettings(event) {
@@ -1341,8 +1401,10 @@
       document.getElementById("companyForm").addEventListener("submit", handleCompanySubmit);
       document.getElementById("memberForm").addEventListener("submit", handleMemberSubmit);
       document.getElementById("companySettingsForm").addEventListener("submit", saveCompanySettings);
+      document.getElementById("refreshAuditButton").addEventListener("click", loadAuditLogs);
       await loadUsers();
       await loadCompanyMembers();
+      await loadAuditLogs();
     }
 
     init().catch(error => {
