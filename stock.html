@@ -27,6 +27,12 @@
         <p>Controle des produits, suivi des mouvements et indicateurs d'aide a la decision.</p>
       </div>
       <div class="toolbar">
+        <label class="company-switcher" for="companySelect">
+          <span>Entreprise active</span>
+          <select id="companySelect" disabled>
+            <option>Chargement...</option>
+          </select>
+        </label>
         <button class="button secondary" id="seedButton" type="button">Charger un exemple</button>
         <button class="button secondary" id="exportButton" type="button">Exporter CSV</button>
       </div>
@@ -219,6 +225,8 @@
     let editingProduct = null;
     let activeMovementButton = null;
     let currentRole = null;
+    let currentCompanyId = null;
+    let companies = [];
     let users = [];
     let editingUser = null;
 
@@ -264,6 +272,21 @@
       }
 
       currentRole = session.role;
+      currentCompanyId = session.companyId;
+
+      const companiesResponse = await fetch("/api/companies");
+      if (companiesResponse.status === 401) {
+        window.location.href = "connexion.html";
+        return;
+      }
+      if (!companiesResponse.ok) {
+        throw new Error("Impossible de charger les entreprises.");
+      }
+
+      const companyData = await companiesResponse.json();
+      companies = Array.isArray(companyData.companies) ? companyData.companies : [];
+      currentCompanyId = companyData.activeCompanyId || currentCompanyId;
+      renderCompanySelector();
 
       const response = await fetch("/api/stock");
       if (response.status === 401) {
@@ -278,6 +301,44 @@
       const data = await response.json();
       Object.assign(products, data.products || {});
       history.splice(0, history.length, ...(Array.isArray(data.history) ? data.history : []));
+    }
+
+    function renderCompanySelector() {
+      const select = document.getElementById("companySelect");
+      select.replaceChildren();
+      companies.forEach(company => {
+        const option = document.createElement("option");
+        option.value = company.id || "";
+        option.textContent = company.name;
+        option.selected = String(company.id) === String(currentCompanyId)
+          || (!company.id && !currentCompanyId);
+        select.appendChild(option);
+      });
+      select.disabled = companies.length <= 1;
+    }
+
+    async function changeCompany(event) {
+      const companyId = event.currentTarget.value;
+      if (!companyId || String(companyId) === String(currentCompanyId)) return;
+
+      event.currentTarget.disabled = true;
+      try {
+        const response = await fetch("/api/session/company", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": decodeURIComponent(csrfToken())
+          },
+          body: JSON.stringify({ companyId })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Changement d'entreprise impossible.");
+        window.location.reload();
+      } catch (error) {
+        document.getElementById("formMessage").textContent = error.message;
+        event.currentTarget.disabled = false;
+        renderCompanySelector();
+      }
     }
 
     function canManageUsers() {
@@ -969,6 +1030,7 @@
       });
       document.getElementById("seedButton").addEventListener("click", seedExample);
       document.getElementById("cancelEditButton").addEventListener("click", resetForm);
+      document.getElementById("companySelect").addEventListener("change", changeCompany);
       document.getElementById("userForm").addEventListener("submit", handleUserSubmit);
       document.getElementById("cancelUserEditButton").addEventListener("click", resetUserForm);
       await loadUsers();

@@ -547,6 +547,35 @@ textarea {
   color: var(--muted);
 }
 
+.company-switcher {
+  display: grid;
+  gap: 4px;
+  min-width: 210px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.company-switcher select {
+  min-height: 42px;
+  padding: 8px 32px 8px 12px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.company-switcher select:disabled {
+  cursor: not-allowed;
+  opacity: 0.78;
+}
+
 .metric-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: 18px;

@@ -823,6 +823,63 @@ async function findDatabaseUserByUsername(username) {
   return result.rows[0] || null;
 }
 
+function companyFromRow(row) {
+  return {
+    id: String(row.id),
+    name: row.name,
+    slug: row.slug,
+    active: Boolean(row.active)
+  };
+}
+
+async function readCompaniesForUser(userId) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT companies.id, companies.name, companies.slug, companies.active
+    FROM companies
+    INNER JOIN company_memberships
+      ON company_memberships.company_id = companies.id
+    WHERE company_memberships.user_id = $1
+      AND company_memberships.active = TRUE
+      AND companies.active = TRUE
+    ORDER BY companies.name ASC
+  `, [userId]);
+  return result.rows.map(companyFromRow);
+}
+
+async function hasActiveCompanyMembership(userId, companyId) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT 1
+    FROM company_memberships
+    INNER JOIN companies ON companies.id = company_memberships.company_id
+    WHERE company_memberships.user_id = $1
+      AND company_memberships.company_id = $2
+      AND company_memberships.active = TRUE
+      AND companies.active = TRUE
+  `, [userId, companyId]);
+  return result.rowCount > 0;
+}
+
+function validateCompanyId(value) {
+  const id = String(value || "").trim();
+  if (!/^\d+$/.test(id) || Number(id) <= 0 || Number(id) > Number.MAX_SAFE_INTEGER) {
+    throw new Error("Identifiant d'entreprise invalide");
+  }
+  return id;
+}
+
+function setSessionCompany(response, session, companyId) {
+  const token = createSessionToken({
+    csrfToken: session.csrfToken,
+    role: session.role,
+    userId: session.userId,
+    companyId,
+    expiresAt: session.expiresAt
+  });
+  response.setHeader("Set-Cookie", cookie(SESSION_COOKIE, token, { httpOnly: true }));
+}
+
 async function countActiveAdmins(excludeId = null) {
   const params = [];
   let query = "SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin' AND active = TRUE";
@@ -880,10 +937,15 @@ async function requireActiveSession(request, response) {
       sendJson(response, 401, { error: "Compte desactive ou introuvable" });
       return null;
     }
+    const activeCompanyId = session.companyId || defaultCompanyId;
+    if (!(await hasActiveCompanyMembership(session.userId, activeCompanyId))) {
+      sendJson(response, 403, { error: "Accès à l'entreprise active refusé" });
+      return null;
+    }
     return {
       ...session,
       role: user.role,
-      companyId: session.companyId || defaultCompanyId
+      companyId: activeCompanyId
     };
   }
 
@@ -1157,6 +1219,53 @@ async function handleApi(request, response, pathname) {
       cookie(CSRF_COOKIE, "", { httpOnly: false, maxAge: 0 })
     ]);
     sendJson(response, 200, { ok: true });
+    return;
+  }
+
+  if (pathname === "/api/companies") {
+    const session = await requireActiveSession(request, response);
+    if (!session) return;
+
+    if (!useDatabase() || !session.userId) {
+      sendJson(response, 200, {
+        companies: [{ id: null, name: DEFAULT_COMPANY_NAME, slug: DEFAULT_COMPANY_SLUG, active: true }],
+        activeCompanyId: null
+      });
+      return;
+    }
+
+    sendJson(response, 200, {
+      companies: await readCompaniesForUser(session.userId),
+      activeCompanyId: session.companyId
+    });
+    return;
+  }
+
+  if (request.method === "POST" && pathname === "/api/session/company") {
+    if (!useDatabase()) {
+      sendJson(response, 503, {
+        error: "Le changement d'entreprise nécessite DATABASE_URL."
+      });
+      return;
+    }
+
+    const session = await requireActiveSession(request, response);
+    if (!session) return;
+    if (!requireCsrf(request, response, session)) return;
+
+    try {
+      const body = await readBody(request);
+      const companyId = validateCompanyId(body.companyId);
+      if (!session.userId || !(await hasActiveCompanyMembership(session.userId, companyId))) {
+        sendJson(response, 403, { error: "Vous n'avez pas accès à cette entreprise." });
+        return;
+      }
+
+      setSessionCompany(response, session, companyId);
+      sendJson(response, 200, { ok: true, companyId });
+    } catch (error) {
+      sendJson(response, 400, { error: error.message || "Entreprise invalide" });
+    }
     return;
   }
 
