@@ -1707,7 +1707,7 @@ async function handleApi(request, response, pathname) {
     const session = await requireActiveSession(request, response);
     if (!session) return;
     try {
-      const reportType = safeDecodeURIComponent(pathname.slice("/api/reports/"));
+      const reportType = safeDecodeURIComponent(pathname.split("/").pop());
       sendJson(response, 200, await readStockReport(session.companyId, reportType));
     } catch (error) {
       sendJson(response, 400, { error: error.message || "Rapport invalide" });
