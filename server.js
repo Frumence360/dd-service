@@ -833,6 +833,27 @@ async function findDatabaseUserByUsername(username) {
   return result.rows[0] || null;
 }
 
+async function ensureFallbackUserInDatabase(role, passwordHash) {
+  await ensureDatabase();
+  const username = role;
+  const result = await queryDatabase(`
+    INSERT INTO users (username, role, password_hash)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (username) DO UPDATE
+      SET role = EXCLUDED.role, password_hash = EXCLUDED.password_hash,
+          active = TRUE, updated_at = now()
+    RETURNING id, username, role, password_hash, active
+  `, [username, role, passwordHash]);
+  const user = result.rows[0];
+  await queryDatabase(`
+    INSERT INTO company_memberships (company_id, user_id, role)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (company_id, user_id) DO UPDATE
+      SET role = EXCLUDED.role, active = TRUE, updated_at = now()
+  `, [defaultCompanyId, user.id, role]);
+  return user;
+}
+
 function companyFromRow(row) {
   return {
     id: String(row.id),
@@ -1295,6 +1316,11 @@ async function handleApi(request, response, pathname) {
         remainingAttempts: Math.max(LOGIN_MAX_ATTEMPTS - state.count - 1, 0)
       });
       return;
+    }
+
+    if (useDatabase() && !userId && user.passwordHash) {
+      const databaseUser = await ensureFallbackUserInDatabase(user.role, user.passwordHash);
+      userId = String(databaseUser.id);
     }
 
     clearLoginFailures(ip);
