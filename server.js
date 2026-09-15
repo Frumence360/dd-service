@@ -608,6 +608,18 @@ async function ensureDatabase() {
       `);
       await queryDatabase("ALTER TABLE products ALTER COLUMN company_id SET NOT NULL");
       await queryDatabase("ALTER TABLE history ALTER COLUMN company_id SET NOT NULL");
+      await queryDatabase(`
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'products_pkey' AND contype = 'p'
+          ) THEN
+            ALTER TABLE products DROP CONSTRAINT products_pkey;
+            ALTER TABLE products ADD CONSTRAINT products_pkey PRIMARY KEY (company_id, key);
+          END IF;
+        END $$;
+      `);
       await queryDatabase("CREATE INDEX IF NOT EXISTS products_company_id_idx ON products (company_id)");
       await queryDatabase("CREATE INDEX IF NOT EXISTS history_company_id_date_idx ON history (company_id, date DESC)");
 
@@ -657,21 +669,22 @@ async function ensureDatabase() {
   await databaseReadyPromise;
 }
 
-async function readStockFromDatabase() {
+async function readStockFromDatabase(companyId = defaultCompanyId) {
   await ensureDatabase();
 
   const [productResult, historyResult] = await Promise.all([
-    queryDatabase("SELECT * FROM products ORDER BY name ASC"),
+    queryDatabase("SELECT * FROM products WHERE company_id = $1 ORDER BY name ASC", [companyId]),
     queryDatabase(`
       SELECT date, product, type, quantity, remaining, note
       FROM (
         SELECT id, date, product, type, quantity, remaining, note
         FROM history
+        WHERE company_id = $1
         ORDER BY date DESC, id DESC
         LIMIT 200
       ) recent
       ORDER BY date ASC, id ASC
-    `)
+    `, [companyId])
   ]);
 
   const products = {};
@@ -686,15 +699,15 @@ async function readStockFromDatabase() {
   };
 }
 
-async function writeStockToDatabase(data) {
+async function writeStockToDatabase(data, companyId = defaultCompanyId) {
   const payload = validateStockPayload(data);
   const pool = getPgPool();
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
-    await client.query("TRUNCATE TABLE history RESTART IDENTITY");
-    await client.query("DELETE FROM products");
+    await client.query("DELETE FROM history WHERE company_id = $1", [companyId]);
+    await client.query("DELETE FROM products WHERE company_id = $1", [companyId]);
 
     for (const [key, product] of Object.entries(payload.products)) {
       await client.query(`
@@ -708,7 +721,7 @@ async function writeStockToDatabase(data) {
         product.threshold,
         product.unitPrice,
         product.updatedAt,
-        defaultCompanyId
+        companyId
       ]);
     }
 
@@ -723,7 +736,7 @@ async function writeStockToDatabase(data) {
         item.quantity,
         item.remaining,
         item.note,
-        defaultCompanyId
+        companyId
       ]);
     }
 
@@ -736,14 +749,17 @@ async function writeStockToDatabase(data) {
   }
 }
 
-async function deleteProductFromDatabase(key) {
+async function deleteProductFromDatabase(key, companyId = defaultCompanyId) {
   await ensureDatabase();
   const pool = getPgPool();
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
-    const productResult = await client.query("DELETE FROM products WHERE key = $1 RETURNING *", [key]);
+    const productResult = await client.query(
+      "DELETE FROM products WHERE key = $1 AND company_id = $2 RETURNING *",
+      [key, companyId]
+    );
 
     if (productResult.rowCount === 0) {
       await client.query("ROLLBACK");
@@ -754,7 +770,7 @@ async function deleteProductFromDatabase(key) {
     await client.query(`
       INSERT INTO history (date, product, type, quantity, remaining, note, company_id)
       VALUES ($1, $2, 'Sortie', 0, 0, 'Produit supprime', $3)
-    `, [new Date().toISOString(), product.name, defaultCompanyId]);
+    `, [new Date().toISOString(), product.name, companyId]);
 
     await client.query("COMMIT");
     return true;
@@ -864,7 +880,11 @@ async function requireActiveSession(request, response) {
       sendJson(response, 401, { error: "Compte desactive ou introuvable" });
       return null;
     }
-    return { ...session, role: user.role };
+    return {
+      ...session,
+      role: user.role,
+      companyId: session.companyId || defaultCompanyId
+    };
   }
 
   return session;
@@ -996,15 +1016,15 @@ function writeStockFile(data) {
   fs.renameSync(tempFile, DATA_FILE);
 }
 
-async function readStock() {
-  if (useDatabase()) return readStockFromDatabase();
+async function readStock(companyId = defaultCompanyId) {
+  if (useDatabase()) return readStockFromDatabase(companyId);
   return readStockFile();
 }
 
-async function writeStock(data) {
+async function writeStock(data, companyId = defaultCompanyId) {
   if (useDatabase()) {
     await ensureDatabase();
-    await writeStockToDatabase(data);
+    await writeStockToDatabase(data, companyId);
     return;
   }
 
@@ -1046,7 +1066,10 @@ async function handleApi(request, response, pathname) {
     const authenticated = Boolean(session && (!session.userId || (activeSession && activeSession.active)));
     sendJson(response, 200, {
       authenticated,
-      role: authenticated ? (activeSession?.role || session?.role || null) : null
+      role: authenticated ? (activeSession?.role || session?.role || null) : null,
+      companyId: authenticated
+        ? (session.companyId || (useDatabase() ? defaultCompanyId : null))
+        : null
     });
     return;
   }
@@ -1113,6 +1136,7 @@ async function handleApi(request, response, pathname) {
       csrfToken,
       role: user.role,
       userId,
+      companyId: useDatabase() ? defaultCompanyId : null,
       expiresAt: Date.now() + SESSION_TTL_MS
     });
 
@@ -1227,7 +1251,7 @@ async function handleApi(request, response, pathname) {
     if (!session) return;
 
     if (request.method === "GET") {
-      sendJson(response, 200, await readStock());
+      sendJson(response, 200, await readStock(session.companyId));
       return;
     }
 
@@ -1240,7 +1264,7 @@ async function handleApi(request, response, pathname) {
       if (!requireCsrf(request, response, session)) return;
 
       try {
-        await writeStock(await readBody(request));
+        await writeStock(await readBody(request), session.companyId);
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message || "Donnees invalides" });
@@ -1264,7 +1288,7 @@ async function handleApi(request, response, pathname) {
       const key = safeDecodeURIComponent(pathname.slice("/api/products/".length));
       if (useDatabase()) {
         try {
-          const deleted = await deleteProductFromDatabase(key);
+          const deleted = await deleteProductFromDatabase(key, session.companyId);
           if (!deleted) {
             sendJson(response, 404, { error: "Produit introuvable" });
             return;
@@ -1277,7 +1301,7 @@ async function handleApi(request, response, pathname) {
         return;
       }
 
-      const data = await readStock();
+      const data = await readStock(session.companyId);
       const product = data.products[key];
 
       if (!product) {
@@ -1294,7 +1318,7 @@ async function handleApi(request, response, pathname) {
         remaining: 0,
         note: "Produit supprime"
       });
-      await writeStock(data);
+      await writeStock(data, session.companyId);
       sendJson(response, 200, { ok: true });
       return;
     }
