@@ -289,6 +289,7 @@
     let currentCompanyId = null;
     let companies = [];
     let users = [];
+    let directoryUsers = [];
     let members = [];
     let editingUser = null;
 
@@ -524,6 +525,7 @@
       try {
         const data = await userRequest("/api/users", { method: "GET" });
         users = Array.isArray(data.users) ? data.users : [];
+        directoryUsers = Array.isArray(data.directory) ? data.directory : users;
         renderUsers();
       } catch (error) {
         document.getElementById("userFormMessage").textContent = error.message;
@@ -533,7 +535,7 @@
     function renderMemberUsers() {
       const select = document.getElementById("memberUser");
       select.replaceChildren();
-      users.forEach(user => {
+      directoryUsers.forEach(user => {
         const option = document.createElement("option");
         option.value = user.id;
         option.textContent = `${user.username} (${roleLabel(user.role)})`;

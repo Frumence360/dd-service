@@ -793,13 +793,23 @@ function userFromRow(row) {
   };
 }
 
-async function readUsersFromDatabase() {
+async function readUsersFromDatabase(companyId = null) {
   await ensureDatabase();
-  const result = await queryDatabase(`
-    SELECT id, username, role, active, created_at, updated_at
-    FROM users
-    ORDER BY username ASC
-  `);
+  const result = companyId
+    ? await queryDatabase(`
+        SELECT users.id, users.username, users.role AS account_role,
+               company_memberships.role, company_memberships.active,
+               users.created_at, company_memberships.updated_at
+        FROM users
+        INNER JOIN company_memberships ON company_memberships.user_id = users.id
+        WHERE company_memberships.company_id = $1
+        ORDER BY users.username ASC
+      `, [companyId])
+    : await queryDatabase(`
+        SELECT id, username, role AS account_role, role, active, created_at, updated_at
+        FROM users
+        ORDER BY username ASC
+      `);
   return result.rows.map(userFromRow);
 }
 
@@ -1501,7 +1511,10 @@ async function handleApi(request, response, pathname) {
     if (!session) return;
 
     if (pathname === "/api/users" && request.method === "GET") {
-      sendJson(response, 200, { users: await readUsersFromDatabase() });
+      sendJson(response, 200, {
+        users: await readUsersFromDatabase(session.companyId),
+        directory: await readUsersFromDatabase()
+      });
       return;
     }
 
@@ -1531,7 +1544,8 @@ async function handleApi(request, response, pathname) {
       return;
     }
     const existingUser = await findDatabaseUserById(id);
-    if (!existingUser) {
+    const membership = await getCompanyMembership(id, session.companyId);
+    if (!existingUser || !membership) {
       sendJson(response, 404, { error: "Compte introuvable" });
       return;
     }
@@ -1541,16 +1555,29 @@ async function handleApi(request, response, pathname) {
 
       try {
         const payload = validateUserPayload(await readBody(request), { partial: true });
-        const nextRole = payload.role || existingUser.role;
-        const nextActive = payload.active === undefined ? existingUser.active : payload.active;
-        if (existingUser.role === "admin" && existingUser.active && (nextRole !== "admin" || !nextActive)) {
-          if (await countActiveAdmins(id) === 0) {
+        const nextRole = payload.role || membership.role;
+        const nextActive = payload.active === undefined ? membership.active : payload.active;
+        if (membership.role === "admin" && membership.active && (nextRole !== "admin" || !nextActive)) {
+          if (await countCompanyAdmins(session.companyId, id) === 0) {
             sendJson(response, 400, { error: "Impossible de desactiver ou retrograder le dernier administrateur." });
             return;
           }
         }
 
-        const updatedUser = await updateUserInDatabase(id, payload, session.companyId);
+        const accountPayload = { ...payload };
+        delete accountPayload.active;
+        if (Object.keys(accountPayload).length > 0) {
+          await updateUserInDatabase(id, accountPayload, session.companyId);
+        }
+        if (payload.active !== undefined) {
+          await queryDatabase(`
+            UPDATE company_memberships
+            SET active = $1, updated_at = now()
+            WHERE company_id = $2 AND user_id = $3
+          `, [payload.active, session.companyId, id]);
+        }
+        const updatedUser = (await readUsersFromDatabase(session.companyId))
+          .find(user => user.id === id);
         sendJson(response, 200, { user: updatedUser });
       } catch (error) {
         const status = error.code === "23505" ? 409 : 400;
@@ -1566,13 +1593,17 @@ async function handleApi(request, response, pathname) {
     if (request.method === "DELETE") {
       if (!requireCsrf(request, response, session)) return;
 
-      if (existingUser.role === "admin" && existingUser.active && await countActiveAdmins(id) === 0) {
+      if (membership.role === "admin" && membership.active
+          && await countCompanyAdmins(session.companyId, id) === 0) {
         sendJson(response, 400, { error: "Impossible de supprimer le dernier administrateur actif." });
         return;
       }
 
-      const deletedUser = await deleteUserFromDatabase(id);
-      sendJson(response, 200, { ok: Boolean(deletedUser) });
+      await queryDatabase(
+        "DELETE FROM company_memberships WHERE company_id = $1 AND user_id = $2",
+        [session.companyId, id]
+      );
+      sendJson(response, 200, { ok: true });
       return;
     }
   }
