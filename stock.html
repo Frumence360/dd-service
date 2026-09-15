@@ -173,8 +173,8 @@
       <form id="companySettingsForm" class="user-form">
         <div class="form-row">
           <div>
-            <label for="companyName">Nom officiel</label>
-            <input id="companyName" name="name" type="text" minlength="2" maxlength="120" required>
+            <label for="settingsCompanyName">Nom officiel</label>
+            <input id="settingsCompanyName" name="name" type="text" minlength="2" maxlength="120" required>
           </div>
           <div>
             <label for="companyPhone">Telephone</label>
@@ -360,6 +360,60 @@
         </table>
       </div>
     </section>
+
+    <section class="panel user-management hidden" id="billingManagement" aria-labelledby="billingTitle">
+      <div class="panel-heading">
+        <div>
+          <h2 id="billingTitle">Abonnement</h2>
+          <p>Gestion du plan de l'entreprise. Le paiement en ligne sera active avec un fournisseur configure.</p>
+        </div>
+      </div>
+      <form id="billingForm" class="user-form">
+        <div class="form-row">
+          <div>
+            <label for="billingPlan">Plan</label>
+            <select id="billingPlan" name="plan">
+              <option value="free">Decouverte</option>
+              <option value="starter">Essentiel</option>
+              <option value="pro">Professionnel</option>
+            </select>
+          </div>
+          <div>
+            <label>Statut</label>
+            <output id="billingStatus">Chargement...</output>
+          </div>
+        </div>
+        <button class="button primary" type="submit">Enregistrer le plan</button>
+        <p class="form-message" id="billingMessage" role="status"></p>
+      </form>
+    </section>
+
+    <section class="panel user-management hidden" id="invitationManagement" aria-labelledby="invitationTitle">
+      <div class="panel-heading">
+        <div>
+          <h2 id="invitationTitle">Inviter un utilisateur</h2>
+          <p>Le lien genere expire apres 7 jours. Aucun e-mail n'est envoye automatiquement.</p>
+        </div>
+      </div>
+      <form id="invitationForm" class="user-form">
+        <div class="form-row">
+          <div>
+            <label for="invitationEmail">E-mail</label>
+            <input id="invitationEmail" name="email" type="email" required>
+          </div>
+          <div>
+            <label for="invitationRole">Role</label>
+            <select id="invitationRole" name="role">
+              <option value="magasinier">Magasinier</option>
+              <option value="lecture">Lecture seule</option>
+              <option value="admin">Administrateur</option>
+            </select>
+          </div>
+        </div>
+        <button class="button secondary" type="submit">Generer une invitation</button>
+        <p class="form-message" id="invitationMessage" role="status"></p>
+      </form>
+    </section>
   </main>
 
   <script>
@@ -521,7 +575,7 @@
       document.querySelector(".brand-logo").src = company.logoUrl || "image/logos.jpg";
       document.querySelector(".brand-logo").alt = company.name;
       document.getElementById("threshold").value = company.defaultThreshold;
-      document.getElementById("companyName").value = company.name;
+      document.getElementById("settingsCompanyName").value = company.name;
       document.getElementById("companyAddress").value = company.address || "";
       document.getElementById("companyPhone").value = company.phone || "";
       document.getElementById("companyLogoUrl").value = company.logoUrl || "";
@@ -563,6 +617,49 @@
         cell.textContent = "Aucune action enregistree.";
         row.appendChild(cell);
         body.appendChild(row);
+      }
+
+      async function loadBilling() {
+        const section = document.getElementById("billingManagement");
+        section.classList.toggle("hidden", !canManageUsers());
+        if (!canManageUsers()) return;
+        const response = await fetch("/api/billing");
+        if (!response.ok) throw new Error("Impossible de charger l'abonnement.");
+        const data = await response.json();
+        document.getElementById("billingPlan").value = data.subscription.plan;
+        document.getElementById("billingStatus").textContent =
+          `${data.subscription.status} - jusqu'au ${new Date(data.subscription.currentPeriodEnd).toLocaleDateString("fr-FR")}`;
+      }
+
+      async function saveBilling(event) {
+        event.preventDefault();
+        const message = document.getElementById("billingMessage");
+        try {
+          const response = await userRequest("/api/billing", {
+            method: "PUT",
+            body: JSON.stringify({ plan: document.getElementById("billingPlan").value })
+          });
+          message.textContent = `Plan ${response.subscription.plan} enregistre.`;
+          await loadBilling();
+        } catch (error) {
+          message.textContent = error.message;
+        }
+      }
+
+      async function createInvitation(event) {
+        event.preventDefault();
+        const message = document.getElementById("invitationMessage");
+        try {
+          const form = event.currentTarget;
+          const data = await userRequest(`/api/companies/${encodeURIComponent(currentCompanyId)}/invitations`, {
+            method: "POST",
+            body: JSON.stringify(Object.fromEntries(new FormData(form).entries()))
+          });
+          message.textContent = `Invitation generee. Token a transmettre : ${data.token}`;
+          form.reset();
+        } catch (error) {
+          message.textContent = error.message;
+        }
       }
 
       function downloadReport(name, rows) {
@@ -1459,12 +1556,16 @@
       document.getElementById("memberForm").addEventListener("submit", handleMemberSubmit);
       document.getElementById("companySettingsForm").addEventListener("submit", saveCompanySettings);
       document.getElementById("refreshAuditButton").addEventListener("click", loadAuditLogs);
+      document.getElementById("billingForm").addEventListener("submit", saveBilling);
+      document.getElementById("invitationForm").addEventListener("submit", createInvitation);
       document.querySelectorAll(".report-button").forEach(button => {
         button.addEventListener("click", () => exportReport(button.dataset.report));
       });
       await loadUsers();
       await loadCompanyMembers();
       await loadAuditLogs();
+      await loadBilling();
+      document.getElementById("invitationManagement").classList.toggle("hidden", !canManageUsers());
     }
 
     init().catch(error => {

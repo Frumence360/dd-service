@@ -42,6 +42,8 @@ let pgPool = null;
 let databaseReadyPromise = null;
 let defaultCompanyId = null;
 const USER_ROLES = new Set(["admin", "magasinier", "lecture"]);
+const SUBSCRIPTION_PLANS = new Set(["free", "starter", "pro"]);
+const INVITATION_ROLES = new Set(["admin", "magasinier", "lecture"]);
 const USERNAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N} ._'-]{2,79}$/u;
 
 function loadEnvFile() {
@@ -138,6 +140,14 @@ function backupStockFile() {
 
 function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+function hashInvitationToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function createInvitationToken() {
+  return crypto.randomBytes(32).toString("hex");
 }
 
 function base64UrlEncode(value) {
@@ -674,6 +684,35 @@ async function ensureDatabase() {
         "CREATE INDEX IF NOT EXISTS audit_logs_company_date_idx ON audit_logs (company_id, created_at DESC)"
       );
       await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS subscriptions (
+          company_id BIGINT PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+          plan TEXT NOT NULL DEFAULT 'free',
+          status TEXT NOT NULL DEFAULT 'trialing',
+          current_period_end TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '30 days'),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await queryDatabase(`
+        INSERT INTO subscriptions (company_id)
+        SELECT id FROM companies
+        WHERE NOT EXISTS (
+          SELECT 1 FROM subscriptions WHERE subscriptions.company_id = companies.id
+        )
+      `);
+      await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS invitations (
+          id BIGSERIAL PRIMARY KEY,
+          company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+          email TEXT NOT NULL,
+          role TEXT NOT NULL CHECK (role IN ('admin', 'magasinier', 'lecture')),
+          token_hash TEXT NOT NULL UNIQUE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          accepted_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await queryDatabase("CREATE INDEX IF NOT EXISTS invitations_company_idx ON invitations (company_id, created_at DESC)");
+      await queryDatabase(`
         INSERT INTO company_memberships (company_id, user_id, role)
         SELECT $1, id, role
         FROM users
@@ -822,6 +861,28 @@ async function readAuditLogs(companyId, limit = 100) {
     actor: row.actor || "Système",
     createdAt: new Date(row.created_at).toISOString()
   }));
+}
+
+async function readSubscription(companyId) {
+  const result = await queryDatabase(
+    "SELECT company_id, plan, status, current_period_end, updated_at FROM subscriptions WHERE company_id = $1",
+    [companyId]
+  );
+  return result.rows[0] ? {
+    companyId: String(result.rows[0].company_id),
+    plan: result.rows[0].plan,
+    status: result.rows[0].status,
+    currentPeriodEnd: new Date(result.rows[0].current_period_end).toISOString(),
+    updatedAt: new Date(result.rows[0].updated_at).toISOString()
+  } : null;
+}
+
+function validateInvitationEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) || email.length > 254) {
+    throw new Error("Adresse e-mail invalide");
+  }
+  return email;
 }
 
 async function readStockReport(companyId, reportType) {
@@ -1108,6 +1169,10 @@ async function createCompanyInDatabase(name, slug, userId) {
       INSERT INTO company_memberships (company_id, user_id, role)
       VALUES ($1, $2, 'admin')
     `, [company.id, userId]);
+    await client.query(`
+      INSERT INTO subscriptions (company_id, plan, status)
+      VALUES ($1, 'free', 'trialing')
+    `, [company.id]);
     await client.query("COMMIT");
     return company;
   } catch (error) {
@@ -1519,6 +1584,122 @@ async function handleApi(request, response, pathname) {
     const session = await requireCompanyAdmin(request, response, getSession(request)?.companyId);
     if (!session) return;
     sendJson(response, 200, { logs: await readAuditLogs(session.companyId) });
+    return;
+  }
+
+  if (pathname === "/api/billing" && (request.method === "GET" || request.method === "PUT")) {
+    const session = await requireCompanyAdmin(request, response, getSession(request)?.companyId);
+    if (!session) return;
+    if (request.method === "GET") {
+      sendJson(response, 200, { subscription: await readSubscription(session.companyId) });
+      return;
+    }
+    if (!requireCsrf(request, response, session)) return;
+    const body = await readBody(request);
+    const plan = String(body.plan || "").trim().toLowerCase();
+    if (!SUBSCRIPTION_PLANS.has(plan)) {
+      sendJson(response, 400, { error: "Plan d'abonnement invalide." });
+      return;
+    }
+    await queryDatabase(`
+      UPDATE subscriptions
+      SET plan = $1, status = 'active', updated_at = now()
+      WHERE company_id = $2
+    `, [plan, session.companyId]);
+    await writeAuditLog({
+      request,
+      companyId: session.companyId,
+      actorUserId: session.userId,
+      action: "billing.plan.update",
+      entityType: "subscription",
+      entityId: session.companyId,
+      metadata: { plan }
+    });
+    sendJson(response, 200, { subscription: await readSubscription(session.companyId) });
+    return;
+  }
+
+  const invitationMatch = pathname.match(/^\/api\/companies\/([^/]+)\/invitations$/);
+  if (invitationMatch) {
+    if (!useDatabase()) {
+      sendJson(response, 503, { error: "Les invitations nécessitent DATABASE_URL." });
+      return;
+    }
+    let companyId;
+    try {
+      companyId = validateCompanyId(safeDecodeURIComponent(invitationMatch[1]));
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+      return;
+    }
+    const session = await requireCompanyAdmin(request, response, companyId);
+    if (!session) return;
+    if (request.method === "GET") {
+      const result = await queryDatabase(`
+        SELECT id, email, role, expires_at, accepted_at, created_at
+        FROM invitations WHERE company_id = $1 ORDER BY created_at DESC LIMIT 50
+      `, [companyId]);
+      sendJson(response, 200, { invitations: result.rows });
+      return;
+    }
+    if (request.method === "POST") {
+      if (!requireCsrf(request, response, session)) return;
+      try {
+        const body = await readBody(request);
+        const email = validateInvitationEmail(body.email);
+        const role = validateUserRole(body.role);
+        const token = createInvitationToken();
+        await queryDatabase(`
+          INSERT INTO invitations (company_id, email, role, token_hash, expires_at)
+          VALUES ($1, $2, $3, $4, now() + interval '7 days')
+        `, [companyId, email, role, hashInvitationToken(token)]);
+        await writeAuditLog({
+          request, companyId, actorUserId: session.userId,
+          action: "invitation.create", entityType: "invitation",
+          metadata: { email, role }
+        });
+        sendJson(response, 201, {
+          invitation: { email, role, expiresInDays: 7 },
+          token
+        });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message || "Invitation impossible." });
+      }
+      return;
+    }
+    sendJson(response, 405, { error: "Methode non autorisee" });
+    return;
+  }
+
+  if (pathname === "/api/invitations/accept" && request.method === "POST") {
+    if (!useDatabase()) {
+      sendJson(response, 503, { error: "Les invitations nécessitent DATABASE_URL." });
+      return;
+    }
+    try {
+      const body = await readBody(request);
+      const token = String(body.token || "").trim();
+      if (!token) throw new Error("Jeton d'invitation manquant.");
+      const invitation = await queryDatabase(`
+        SELECT id, company_id, role, email
+        FROM invitations
+        WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > now()
+      `, [hashInvitationToken(token)]);
+      if (invitation.rowCount === 0) {
+        sendJson(response, 400, { error: "Invitation invalide ou expiree." });
+        return;
+      }
+      const payload = validateUserPayload({
+        username: body.username,
+        role: invitation.rows[0].role,
+        password: body.password
+      });
+      const user = await createUserInDatabase(payload, invitation.rows[0].company_id);
+      await queryDatabase("UPDATE invitations SET accepted_at = now() WHERE id = $1", [invitation.rows[0].id]);
+      sendJson(response, 201, { ok: true, username: user.username });
+    } catch (error) {
+      sendJson(response, 400, { error: error.message || "Acceptation impossible." });
+    }
     return;
   }
 
