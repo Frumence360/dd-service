@@ -492,6 +492,12 @@ textarea {
   margin-top: 24px;
 }
 
+.auth-form label span {
+  color: #aebbd0;
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .auth-form input,
 .form-panel input,
 .form-panel select,
@@ -576,6 +582,44 @@ textarea {
 .charts-grid {
   grid-template-columns: minmax(0, 1fr) minmax(420px, 0.9fr);
   margin-top: 18px;
+}
+
+.user-management {
+  margin-top: 18px;
+}
+
+.user-form {
+  display: grid;
+  gap: 10px;
+  max-width: 760px;
+  margin-bottom: 24px;
+}
+
+.user-form h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.user-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.user-form input,
+.user-form select {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.user-table-wrap table {
+  min-width: 760px;
 }
 
 .panel {

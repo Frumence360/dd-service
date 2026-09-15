@@ -38,6 +38,8 @@ const PRODUCT_FIELDS = new Set(["name", "category", "quantity", "threshold", "un
 const HISTORY_FIELDS = new Set(["date", "product", "type", "quantity", "remaining", "note"]);
 let pgPool = null;
 let databaseReadyPromise = null;
+const USER_ROLES = new Set(["admin", "magasinier", "lecture"]);
+const USERNAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N} ._'-]{2,79}$/u;
 
 function loadEnvFile() {
   const envFile = path.join(ROOT, ".env");
@@ -199,9 +201,7 @@ function readSessionToken(token) {
 }
 
 function findUserByPassword(password) {
-  const passwordHash = hashPassword(password);
-
-  return configuredUsers().find(user => user.passwordHash === passwordHash) || null;
+  return configuredUsers().find(user => safePasswordHashMatch(password, user.passwordHash)) || null;
 }
 
 function parseCookies(request) {
@@ -325,6 +325,79 @@ function assertText(value, label, { min = 1, max = 120 } = {}) {
   }
 
   return text;
+}
+
+function normalizeUsername(value) {
+  return normalizeName(value).toLocaleLowerCase("fr-FR");
+}
+
+function validateUsername(value) {
+  const username = assertText(value, "Compte.identifiant", { min: 3, max: 80 });
+  if (!USERNAME_PATTERN.test(username)) {
+    throw new Error("Compte.identifiant: utilisez 3 a 80 lettres, chiffres, espaces ou . _ - '");
+  }
+  return username;
+}
+
+function validateUserRole(value) {
+  const role = String(value || "").trim();
+  if (!USER_ROLES.has(role)) {
+    throw new Error("Compte.role: role non autorise");
+  }
+  return role;
+}
+
+function validateUserPassword(value, { required = true } = {}) {
+  if (!required && (value === undefined || value === null || value === "")) return null;
+
+  const password = String(value || "");
+  if (password.length < 8 || password.length > 128) {
+    throw new Error("Compte.motDePasse: 8 a 128 caracteres requis");
+  }
+  return password;
+}
+
+function validateUserId(value) {
+  const id = String(value || "").trim();
+  if (!/^\d+$/.test(id) || Number(id) <= 0 || Number(id) > Number.MAX_SAFE_INTEGER) {
+    throw new Error("Identifiant de compte invalide");
+  }
+  return id;
+}
+
+function safePasswordHashMatch(password, expectedHash) {
+  const actual = Buffer.from(hashPassword(password), "utf8");
+  const expected = Buffer.from(String(expectedHash || ""), "utf8");
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function validateUserPayload(data, { partial = false } = {}) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Donnees de compte invalides");
+  }
+
+  const allowedFields = partial
+    ? new Set(["username", "name", "role", "password", "active"])
+    : new Set(["username", "name", "role", "password"]);
+  assertKnownFields(data, allowedFields, "Compte");
+
+  const rawUsername = data.username === undefined ? data.name : data.username;
+  const result = {};
+  if (!partial || rawUsername !== undefined) {
+    result.username = validateUsername(rawUsername);
+  }
+  if (!partial || data.role !== undefined) {
+    result.role = validateUserRole(data.role);
+  }
+  if (!partial || data.password !== undefined) {
+    result.password = validateUserPassword(data.password, { required: !partial });
+  }
+  if (data.active !== undefined) {
+    if (typeof data.active !== "boolean") throw new Error("Compte.actif: valeur booleenne requise");
+    result.active = data.active;
+  }
+
+  return result;
 }
 
 function assertIsoDate(value, label) {
@@ -488,6 +561,18 @@ async function ensureDatabase() {
         )
       `);
 
+      await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS users (
+          id BIGSERIAL PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          role TEXT NOT NULL CHECK (role IN ('admin', 'magasinier', 'lecture')),
+          password_hash TEXT NOT NULL,
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+
       const count = await queryDatabase("SELECT COUNT(*)::int AS count FROM products");
       if (count.rows[0].count === 0 && fs.existsSync(SEED_DATA_FILE)) {
         const seed = validateStockPayload(JSON.parse(fs.readFileSync(SEED_DATA_FILE, "utf8")));
@@ -606,6 +691,172 @@ async function deleteProductFromDatabase(key) {
   }
 }
 
+function userFromRow(row) {
+  return {
+    id: String(row.id),
+    username: row.username,
+    role: row.role,
+    active: Boolean(row.active),
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString()
+  };
+}
+
+async function readUsersFromDatabase() {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT id, username, role, active, created_at, updated_at
+    FROM users
+    ORDER BY username ASC
+  `);
+  return result.rows.map(userFromRow);
+}
+
+async function findDatabaseUserById(id) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT id, username, role, password_hash, active, created_at, updated_at
+    FROM users
+    WHERE id = $1
+  `, [id]);
+  return result.rows[0] || null;
+}
+
+async function findDatabaseUserByUsername(username) {
+  await ensureDatabase();
+  const result = await queryDatabase(`
+    SELECT id, username, role, password_hash, active, created_at, updated_at
+    FROM users
+    WHERE LOWER(username) = LOWER($1)
+  `, [String(username || "").trim()]);
+  return result.rows[0] || null;
+}
+
+async function countActiveAdmins(excludeId = null) {
+  const params = [];
+  let query = "SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin' AND active = TRUE";
+  if (excludeId !== null) {
+    params.push(excludeId);
+    query += " AND id <> $1";
+  }
+  const result = await queryDatabase(query, params);
+  return result.rows[0].count;
+}
+
+function accountManagementUnavailable(response) {
+  sendJson(response, 503, {
+    error: "Gestion des comptes indisponible: configurez DATABASE_URL pour utiliser les comptes persistants."
+  });
+}
+
+async function requireAdmin(request, response) {
+  const session = getSession(request);
+  if (!session) {
+    sendJson(response, 401, { error: "Non authentifie" });
+    return null;
+  }
+
+  if (session.role !== "admin") {
+    sendJson(response, 403, { error: "Gestion des comptes reservee a l'administrateur" });
+    return null;
+  }
+
+  if (useDatabase() && session.userId) {
+    const user = await findDatabaseUserById(session.userId);
+    if (!user || !user.active) {
+      sendJson(response, 401, { error: "Compte desactive ou introuvable" });
+      return null;
+    }
+    if (user.role !== "admin") {
+      sendJson(response, 403, { error: "Gestion des comptes reservee a l'administrateur" });
+      return null;
+    }
+  }
+
+  return session;
+}
+
+async function requireActiveSession(request, response) {
+  const session = getSession(request);
+  if (!session) {
+    sendJson(response, 401, { error: "Non authentifie" });
+    return null;
+  }
+
+  if (useDatabase() && session.userId) {
+    const user = await findDatabaseUserById(session.userId);
+    if (!user || !user.active) {
+      sendJson(response, 401, { error: "Compte desactive ou introuvable" });
+      return null;
+    }
+    return { ...session, role: user.role };
+  }
+
+  return session;
+}
+
+async function createUserInDatabase(payload) {
+  await ensureDatabase();
+  const duplicate = await queryDatabase(
+    "SELECT 1 FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
+    [payload.username]
+  );
+  if (duplicate.rowCount > 0) {
+    const error = new Error("Cet identifiant est deja utilise.");
+    error.code = "23505";
+    throw error;
+  }
+  const result = await queryDatabase(`
+    INSERT INTO users (username, role, password_hash)
+    VALUES ($1, $2, $3)
+    RETURNING id, username, role, active, created_at, updated_at
+  `, [payload.username, payload.role, hashPassword(payload.password)]);
+  return userFromRow(result.rows[0]);
+}
+
+async function updateUserInDatabase(id, payload) {
+  await ensureDatabase();
+  if (payload.username !== undefined) {
+    const duplicate = await queryDatabase(
+      "SELECT 1 FROM users WHERE LOWER(username) = LOWER($1) AND id <> $2 LIMIT 1",
+      [payload.username, id]
+    );
+    if (duplicate.rowCount > 0) {
+      const error = new Error("Cet identifiant est deja utilise.");
+      error.code = "23505";
+      throw error;
+    }
+  }
+  const fields = [];
+  const params = [];
+  const addField = (sql, value) => {
+    params.push(value);
+    fields.push(`${sql} $${params.length}`);
+  };
+
+  if (payload.username !== undefined) addField("username =", payload.username);
+  if (payload.role !== undefined) addField("role =", payload.role);
+  if (payload.password !== undefined) addField("password_hash =", hashPassword(payload.password));
+  if (payload.active !== undefined) addField("active =", payload.active);
+
+  if (fields.length === 0) throw new Error("Aucune modification demandee");
+  fields.push("updated_at = now()");
+  params.push(id);
+  const result = await queryDatabase(`
+    UPDATE users
+    SET ${fields.join(", ")}
+    WHERE id = $${params.length}
+    RETURNING id, username, role, active, created_at, updated_at
+  `, params);
+  return result.rows[0] ? userFromRow(result.rows[0]) : null;
+}
+
+async function deleteUserFromDatabase(id) {
+  await ensureDatabase();
+  const result = await queryDatabase("DELETE FROM users WHERE id = $1 RETURNING id, role, active", [id]);
+  return result.rows[0] || null;
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -692,9 +943,13 @@ function canDeleteProduct(role) {
 async function handleApi(request, response, pathname) {
   if (request.method === "GET" && pathname === "/api/session") {
     const session = getSession(request);
+    const activeSession = session && useDatabase() && session.userId
+      ? await findDatabaseUserById(session.userId)
+      : null;
+    const authenticated = Boolean(session && (!session.userId || (activeSession && activeSession.active)));
     sendJson(response, 200, {
-      authenticated: Boolean(session),
-      role: session?.role || null
+      authenticated,
+      role: authenticated ? (activeSession?.role || session?.role || null) : null
     });
     return;
   }
@@ -702,7 +957,7 @@ async function handleApi(request, response, pathname) {
   if (request.method === "POST" && pathname === "/api/login") {
     const { ip, state } = loginState(request);
 
-    if (configuredUsers().length === 0) {
+    if (configuredUsers().length === 0 && !useDatabase()) {
       sendJson(response, 500, {
         error: "Configuration serveur incomplete: variables de mots de passe manquantes."
       });
@@ -721,8 +976,30 @@ async function handleApi(request, response, pathname) {
     }
 
     const body = await readBody(request);
+    const password = String(body.password || "");
+    const identifier = normalizeUsername(body.identifier || body.username || "");
+    let user = null;
+    let userId = null;
 
-    const user = findUserByPassword(String(body.password || ""));
+    if (useDatabase()) {
+      await ensureDatabase();
+      if (identifier) {
+        const databaseUser = await findDatabaseUserByUsername(identifier);
+        if (databaseUser && databaseUser.active && safePasswordHashMatch(password, databaseUser.password_hash)) {
+          user = { role: databaseUser.role };
+          userId = String(databaseUser.id);
+        }
+      }
+    }
+
+    if (!user && !identifier) {
+      user = findUserByPassword(password);
+    } else if (!user && identifier) {
+      const fallbackUser = configuredUsers().find(candidate => candidate.role === identifier);
+      if (fallbackUser && safePasswordHashMatch(password, fallbackUser.passwordHash)) {
+        user = fallbackUser;
+      }
+    }
 
     if (!user) {
       recordLoginFailure(ip, state);
@@ -738,6 +1015,7 @@ async function handleApi(request, response, pathname) {
     const token = createSessionToken({
       csrfToken,
       role: user.role,
+      userId,
       expiresAt: Date.now() + SESSION_TTL_MS
     });
 
@@ -761,12 +1039,95 @@ async function handleApi(request, response, pathname) {
     return;
   }
 
-  if (pathname === "/api/stock") {
-    const session = getSession(request);
-    if (!session) {
-      sendJson(response, 401, { error: "Non authentifie" });
+  if (pathname === "/api/users" || pathname.startsWith("/api/users/")) {
+    if (!useDatabase()) {
+      accountManagementUnavailable(response);
       return;
     }
+
+    const session = await requireAdmin(request, response);
+    if (!session) return;
+
+    if (pathname === "/api/users" && request.method === "GET") {
+      sendJson(response, 200, { users: await readUsersFromDatabase() });
+      return;
+    }
+
+    if (pathname === "/api/users" && request.method === "POST") {
+      if (!requireCsrf(request, response, session)) return;
+
+      try {
+        const payload = validateUserPayload(await readBody(request));
+        const user = await createUserInDatabase(payload);
+        sendJson(response, 201, { user });
+      } catch (error) {
+        const status = error.code === "23505" ? 409 : 400;
+        sendJson(response, status, {
+          error: error.code === "23505"
+            ? "Cet identifiant est deja utilise."
+            : error.message || "Creation du compte impossible"
+        });
+      }
+      return;
+    }
+
+    let id;
+    try {
+      id = validateUserId(safeDecodeURIComponent(pathname.slice("/api/users/".length)));
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+      return;
+    }
+    const existingUser = await findDatabaseUserById(id);
+    if (!existingUser) {
+      sendJson(response, 404, { error: "Compte introuvable" });
+      return;
+    }
+
+    if ((request.method === "PUT" || request.method === "PATCH") && pathname.startsWith("/api/users/")) {
+      if (!requireCsrf(request, response, session)) return;
+
+      try {
+        const payload = validateUserPayload(await readBody(request), { partial: true });
+        const nextRole = payload.role || existingUser.role;
+        const nextActive = payload.active === undefined ? existingUser.active : payload.active;
+        if (existingUser.role === "admin" && existingUser.active && (nextRole !== "admin" || !nextActive)) {
+          if (await countActiveAdmins(id) === 0) {
+            sendJson(response, 400, { error: "Impossible de desactiver ou retrograder le dernier administrateur." });
+            return;
+          }
+        }
+
+        const updatedUser = await updateUserInDatabase(id, payload);
+        sendJson(response, 200, { user: updatedUser });
+      } catch (error) {
+        const status = error.code === "23505" ? 409 : 400;
+        sendJson(response, status, {
+          error: error.code === "23505"
+            ? "Cet identifiant est deja utilise."
+            : error.message || "Modification du compte impossible"
+        });
+      }
+      return;
+    }
+
+    if (request.method === "DELETE") {
+      if (!requireCsrf(request, response, session)) return;
+
+      if (existingUser.role === "admin" && existingUser.active && await countActiveAdmins(id) === 0) {
+        sendJson(response, 400, { error: "Impossible de supprimer le dernier administrateur actif." });
+        return;
+      }
+
+      const deletedUser = await deleteUserFromDatabase(id);
+      sendJson(response, 200, { ok: Boolean(deletedUser) });
+      return;
+    }
+  }
+
+  if (pathname === "/api/stock") {
+    const session = await requireActiveSession(request, response);
+    if (!session) return;
 
     if (request.method === "GET") {
       sendJson(response, 200, await readStock());
@@ -792,11 +1153,8 @@ async function handleApi(request, response, pathname) {
   }
 
   if (pathname.startsWith("/api/products/")) {
-    const session = getSession(request);
-    if (!session) {
-      sendJson(response, 401, { error: "Non authentifie" });
-      return;
-    }
+    const session = await requireActiveSession(request, response);
+    if (!session) return;
 
     if (request.method === "DELETE") {
       if (!canDeleteProduct(session.role)) {

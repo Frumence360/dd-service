@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DD Service | Acces securise</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body class="auth-page">
   <main class="auth-shell">
@@ -21,6 +21,8 @@
       </p>
 
       <form id="loginForm" class="auth-form">
+        <label for="identifier">Nom ou identifiant <span>(facultatif pour les comptes de secours)</span></label>
+        <input type="text" id="identifier" autocomplete="username" placeholder="Identifiant du compte">
         <label for="password">Mot de passe</label>
         <input type="password" id="password" autocomplete="current-password" required>
         <button class="button primary" type="submit">Se connecter</button>
@@ -32,6 +34,7 @@
   <script>
     document.getElementById("loginForm").addEventListener("submit", async event => {
       event.preventDefault();
+      const identifier = document.getElementById("identifier").value.trim();
       const password = document.getElementById("password").value;
       const message = document.getElementById("message");
       message.textContent = "";
@@ -40,7 +43,7 @@
         const response = await fetch("/api/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password })
+          body: JSON.stringify({ identifier, password })
         });
 
         if (response.ok) {
@@ -64,6 +67,12 @@
         if (response.status === 500) {
           const data = await response.json();
           message.textContent = data.error || "Configuration serveur incomplete.";
+          return;
+        }
+
+        if (response.status === 400) {
+          const data = await response.json();
+          message.textContent = data.error || "Identifiant ou mot de passe invalide.";
           return;
         }
 

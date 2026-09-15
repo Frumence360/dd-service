@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DD Service | Tableau de bord stock</title>
   <script src="js/chart.umd.min.js"></script>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body class="dashboard-page">
   <header class="app-header">
@@ -156,6 +156,59 @@
         </div>
       </article>
     </section>
+
+    <section class="panel user-management hidden" id="userManagement" aria-labelledby="userManagementTitle">
+      <div class="panel-heading">
+        <div>
+          <h2 id="userManagementTitle">Gestion des utilisateurs</h2>
+          <p>Comptes persistants PostgreSQL. Les mots de passe ne sont jamais affiches.</p>
+        </div>
+      </div>
+
+      <form id="userForm" class="user-form">
+        <h3 id="userFormTitle">Creer un compte</h3>
+        <label for="userUsername">Nom ou identifiant</label>
+        <input id="userUsername" name="username" type="text" minlength="3" maxlength="80"
+          autocomplete="off" required placeholder="Ex. Jean Dupont">
+
+        <div class="form-row">
+          <div>
+            <label for="userRole">Role</label>
+            <select id="userRole" name="role" required>
+              <option value="admin">Administrateur</option>
+              <option value="magasinier">Magasinier</option>
+              <option value="lecture">Lecture seule</option>
+            </select>
+          </div>
+          <div>
+            <label for="userPassword">Mot de passe</label>
+            <input id="userPassword" name="password" type="password" minlength="8" maxlength="128"
+              autocomplete="new-password">
+          </div>
+        </div>
+
+        <div class="user-form-actions">
+          <button class="button primary" id="userSubmitButton" type="submit">Creer le compte</button>
+          <button class="button secondary hidden" id="cancelUserEditButton" type="button">Annuler</button>
+        </div>
+        <p class="form-message" id="userFormMessage" role="status"></p>
+      </form>
+
+      <div class="table-wrap user-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Nom ou identifiant</th>
+              <th>Role</th>
+              <th>Etat</th>
+              <th>Derniere modification</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -166,6 +219,8 @@
     let editingProduct = null;
     let activeMovementButton = null;
     let currentRole = null;
+    let users = [];
+    let editingUser = null;
 
     const currency = new Intl.NumberFormat("fr-FR", {
       style: "currency",
@@ -225,6 +280,10 @@
       history.splice(0, history.length, ...(Array.isArray(data.history) ? data.history : []));
     }
 
+    function canManageUsers() {
+      return currentRole === "admin";
+    }
+
     function canWriteStock() {
       return ["admin", "magasinier"].includes(currentRole);
     }
@@ -257,6 +316,192 @@
         ?.split("=")
         .slice(1)
         .join("=") || "";
+    }
+
+    async function userRequest(url, options = {}) {
+      const headers = {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": decodeURIComponent(csrfToken()),
+        ...(options.headers || {})
+      };
+      const response = await fetch(url, { ...options, headers });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || "Operation sur le compte impossible.");
+      }
+      return data;
+    }
+
+    function roleLabel(role) {
+      return {
+        admin: "Administrateur",
+        magasinier: "Magasinier",
+        lecture: "Lecture seule"
+      }[role] || role;
+    }
+
+    function renderUsers() {
+      const body = document.getElementById("usersBody");
+      body.replaceChildren();
+
+      if (users.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.className = "empty-state";
+        cell.textContent = "Aucun compte persistant.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+
+      users.forEach(user => {
+        const row = document.createElement("tr");
+        [user.username, roleLabel(user.role), user.active ? "Actif" : "Desactive",
+          new Date(user.updatedAt).toLocaleString("fr-FR")].forEach(value => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        });
+
+        const actionCell = document.createElement("td");
+        const editButton = document.createElement("button");
+        editButton.className = "table-action";
+        editButton.type = "button";
+        editButton.textContent = "Modifier";
+        editButton.addEventListener("click", () => startUserEdit(user));
+
+        const toggleButton = document.createElement("button");
+        toggleButton.className = "table-action";
+        toggleButton.type = "button";
+        toggleButton.textContent = user.active ? "Desactiver" : "Activer";
+        toggleButton.addEventListener("click", () => toggleUser(user));
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "table-action danger-text";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Supprimer";
+        deleteButton.addEventListener("click", () => deleteUser(user));
+        actionCell.append(editButton, toggleButton, deleteButton);
+        row.appendChild(actionCell);
+        body.appendChild(row);
+      });
+    }
+
+    async function loadUsers() {
+      if (!canManageUsers()) return;
+
+      const section = document.getElementById("userManagement");
+      section.classList.remove("hidden");
+      try {
+        const data = await userRequest("/api/users", { method: "GET" });
+        users = Array.isArray(data.users) ? data.users : [];
+        renderUsers();
+      } catch (error) {
+        document.getElementById("userFormMessage").textContent = error.message;
+      }
+    }
+
+    async function handleUserSubmit(event) {
+      event.preventDefault();
+      if (!canManageUsers()) return;
+
+      const form = event.currentTarget;
+      const username = form.elements.username.value.trim().replace(/\s+/g, " ");
+      const role = form.elements.role.value;
+      const password = form.elements.password.value;
+      const message = document.getElementById("userFormMessage");
+      if (username.length < 3 || username.length > 80 ||
+          (!editingUser && (password.length < 8 || password.length > 128)) ||
+          (editingUser && password && (password.length < 8 || password.length > 128))) {
+        message.textContent = editingUser
+          ? "Identifiant: 3 a 80 caracteres. Mot de passe: 8 a 128 caracteres s'il est modifie."
+          : "Identifiant: 3 a 80 caracteres. Mot de passe: 8 a 128 caracteres.";
+        return;
+      }
+
+      const submitButton = event.submitter;
+      setButtonWorking(submitButton, true);
+      try {
+        const wasEditing = Boolean(editingUser);
+        const body = { username, role };
+        if (password) body.password = password;
+        const data = await userRequest(
+          editingUser ? `/api/users/${encodeURIComponent(editingUser.id)}` : "/api/users",
+          {
+            method: editingUser ? "PATCH" : "POST",
+            body: JSON.stringify(editingUser ? body : { ...body, password })
+          }
+        );
+        if (wasEditing) {
+          users = users.map(item => item.id === editingUser.id ? data.user : item);
+        } else {
+          users.push(data.user);
+        }
+        users.sort((a, b) => a.username.localeCompare(b.username));
+        renderUsers();
+        resetUserForm();
+        message.textContent = wasEditing ? "Compte modifie avec succes." : "Compte cree avec succes.";
+      } catch (error) {
+        message.textContent = error.message;
+      } finally {
+        setButtonWorking(submitButton, false);
+      }
+    }
+
+    function startUserEdit(user) {
+      editingUser = user;
+      const form = document.getElementById("userForm");
+      form.elements.username.value = user.username;
+      form.elements.role.value = user.role;
+      form.elements.password.value = "";
+      document.getElementById("userFormTitle").textContent = "Modifier le compte";
+      document.getElementById("userSubmitButton").textContent = "Enregistrer les modifications";
+      document.getElementById("cancelUserEditButton").classList.remove("hidden");
+      document.getElementById("userFormMessage").textContent = "";
+      document.getElementById("userUsername").focus();
+    }
+
+    function resetUserForm() {
+      editingUser = null;
+      document.getElementById("userForm").reset();
+      document.getElementById("userFormTitle").textContent = "Creer un compte";
+      document.getElementById("userSubmitButton").textContent = "Creer le compte";
+      document.getElementById("cancelUserEditButton").classList.add("hidden");
+    }
+
+    async function toggleUser(user) {
+      if (!confirm(`${user.active ? "Desactiver" : "Activer"} le compte "${user.username}" ?`)) return;
+
+      try {
+        const data = await userRequest(`/api/users/${encodeURIComponent(user.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ active: !user.active })
+        });
+        users = users.map(item => item.id === user.id ? data.user : item);
+        renderUsers();
+        document.getElementById("userFormMessage").textContent = "Etat du compte mis a jour.";
+      } catch (error) {
+        document.getElementById("userFormMessage").textContent = error.message;
+      }
+    }
+
+    async function deleteUser(user) {
+      if (!confirm(`Supprimer definitivement le compte "${user.username}" ?`)) return;
+
+      try {
+        await userRequest(`/api/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
+        users = users.filter(item => item.id !== user.id);
+        renderUsers();
+        document.getElementById("userFormMessage").textContent = "Compte supprime.";
+      } catch (error) {
+        document.getElementById("userFormMessage").textContent = error.message;
+      }
     }
 
     async function saveData() {
@@ -724,6 +969,9 @@
       });
       document.getElementById("seedButton").addEventListener("click", seedExample);
       document.getElementById("cancelEditButton").addEventListener("click", resetForm);
+      document.getElementById("userForm").addEventListener("submit", handleUserSubmit);
+      document.getElementById("cancelUserEditButton").addEventListener("click", resetUserForm);
+      await loadUsers();
     }
 
     init().catch(error => {
