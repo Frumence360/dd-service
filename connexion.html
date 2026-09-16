@@ -31,56 +31,6 @@
     </section>
   </main>
 
-  <script>
-    document.getElementById("loginForm").addEventListener("submit", async event => {
-      event.preventDefault();
-      const identifier = document.getElementById("identifier").value.trim();
-      const password = document.getElementById("password").value;
-      const message = document.getElementById("message");
-      message.textContent = "";
-
-      try {
-        const response = await fetch("/api/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ identifier, password })
-        });
-
-        if (response.ok) {
-          window.location.href = "stock.html";
-          return;
-        }
-
-        if (response.status === 401) {
-          const data = await response.json();
-          message.textContent = `Mot de passe incorrect. Tentatives restantes: ${data.remainingAttempts}.`;
-          return;
-        }
-
-        if (response.status === 429) {
-          const data = await response.json();
-          const minutes = Math.ceil((data.retryAfter || 0) / 60);
-          message.textContent = `Trop de tentatives. Reessaie dans ${minutes} minute(s).`;
-          return;
-        }
-
-        if (response.status === 500) {
-          const data = await response.json();
-          message.textContent = data.error || "Configuration serveur incomplete.";
-          return;
-        }
-
-        if (response.status === 400) {
-          const data = await response.json();
-          message.textContent = data.error || "Identifiant ou mot de passe invalide.";
-          return;
-        }
-
-        message.textContent = "Ouvre l'application avec le lanceur HTTPS.";
-      } catch {
-        message.textContent = "Serveur indisponible. Lance le serveur puis ouvre l'adresse HTTPS affichee.";
-      }
-    });
-  </script>
+  <script src="js/login.js"></script>
 </body>
 </html>

@@ -4,12 +4,43 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DD Service | La gestion simple pour les PME</title>
+  <meta name="description" content="DD Service aide les PME à suivre leurs stocks, leurs mouvements et leurs indicateurs depuis une plateforme web simple.">
+  <link rel="canonical" href="/">
+  <meta name="theme-color" content="#172033">
+  <link rel="icon" href="image/logos.jpg" type="image/jpeg">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="DD Service">
+  <meta property="og:title" content="DD Service | La gestion simple pour les PME">
+  <meta property="og:description" content="Suivez vos stocks, vos mouvements et vos indicateurs avec DD Service.">
+  <meta property="og:url" content="/">
+  <meta property="og:image" content="/image/so1.jpg">
+  <meta property="og:image:alt" content="Illustration de la gestion opérationnelle des stocks">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="DD Service | La gestion simple pour les PME">
+  <meta name="twitter:description" content="Suivez vos stocks, vos mouvements et vos indicateurs avec DD Service.">
+  <meta name="twitter:image" content="/image/so1.jpg">
+  <meta name="twitter:image:alt" content="Illustration de la gestion opérationnelle des stocks">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "DD Service",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "Web",
+      "description": "Plateforme web de gestion des stocks, des mouvements et des indicateurs pour les PME.",
+      "url": "/",
+      "provider": {
+        "@type": "Organization",
+        "name": "DD Service"
+      }
+    }
+  </script>
   <link rel="stylesheet" href="style.css?v=2">
 </head>
 <body>
   <header class="site-header">
     <a class="brand" href="index.html" aria-label="DD Service">
-      <img src="image/logos.jpg" alt="" class="brand-logo">
+      <img src="image/logos.jpg" alt="Logo DD Service" class="brand-logo">
       <span>DD Service</span>
     </a>
     <nav class="main-nav" aria-label="Navigation principale">
@@ -22,7 +53,7 @@
 
   <main>
     <section class="hero" aria-labelledby="hero-title">
-      <img src="image/so1.jpg" alt="Equipe et environnement de gestion de stock" class="hero-image">
+      <img src="image/so1.jpg" alt="Illustration de la gestion de stock" class="hero-image">
       <div class="hero-content">
         <p class="eyebrow">La gestion opérationnelle des PME</p>
         <h1 id="hero-title">Gardez le contrôle de votre activité, simplement.</h1>
@@ -124,23 +155,6 @@
     <p>&copy; 2026 DD Service. Gestion opérationnelle pour les PME.</p>
     <a class="footer-button" href="concepteur.html">En savoir plus</a>
   </footer>
-  <script>
-    document.querySelectorAll(".main-nav a[href]").forEach(link => {
-      const href = link.getAttribute("href");
-
-      if (href === "index.html" && !window.location.hash) {
-        link.classList.add("is-active");
-      }
-
-      if (href === window.location.hash) {
-        link.classList.add("is-active");
-      }
-
-      link.addEventListener("click", () => {
-        document.querySelectorAll(".main-nav a").forEach(item => item.classList.remove("is-active"));
-        link.classList.add("is-active");
-      });
-    });
-  </script>
+  <script src="js/navigation.js"></script>
 </body>
 </html>

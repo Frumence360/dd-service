@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /stock.html
+Disallow: /connexion.html
+Disallow: /deconnexion.html
+Disallow: /a.html
+
+Sitemap: /sitemap.xml

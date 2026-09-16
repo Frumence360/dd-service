@@ -17,6 +17,10 @@
       "use": "@vercel/static"
     },
     {
+      "src": "*.{txt,xml}",
+      "use": "@vercel/static"
+    },
+    {
       "src": "image/**",
       "use": "@vercel/static"
     },

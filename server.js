@@ -4,6 +4,7 @@ const http = require("http");
 const https = require("https");
 const os = require("os");
 const path = require("path");
+const { promisify } = require("util");
 
 const ROOT = __dirname;
 loadEnvFile();
@@ -13,6 +14,7 @@ const HTTPS_ENABLED = process.env.HTTPS_ENABLED === "true";
 const HTTPS_PFX = process.env.HTTPS_PFX || path.join(ROOT, "certs", "localhost.pfx");
 const HTTPS_PASSPHRASE = process.env.HTTPS_PASSPHRASE || "";
 const IS_VERCEL = Boolean(process.env.VERCEL);
+const IS_PRODUCTION = IS_VERCEL || process.env.NODE_ENV === "production";
 const DATA_DIR = path.join(ROOT, "data");
 const SEED_DATA_FILE = path.join(DATA_DIR, "stock.json");
 const RUNTIME_DATA_DIR = IS_VERCEL ? path.join(os.tmpdir(), "dd-service-data") : DATA_DIR;
@@ -34,6 +36,14 @@ const LOGIN_LOCK_MS = 1000 * 60 * 5;
 const COOKIE_SECURE = HTTPS_ENABLED || IS_VERCEL || process.env.COOKIE_SECURE === "true";
 const DEFAULT_COMPANY_NAME = "DD Service";
 const DEFAULT_COMPANY_SLUG = "dd-service";
+const SCRYPT_COST = 16 * 1024;
+const SCRYPT_BLOCK_SIZE = 8;
+const SCRYPT_PARALLELIZATION = 1;
+const SCRYPT_KEY_LENGTH = 64;
+const SCRYPT_SALT_LENGTH = 16;
+const SCRYPT_MAX_MEMORY = 32 * 1024 * 1024;
+const scryptAsync = promisify(crypto.scrypt);
+const DEVELOPMENT_SESSION_SECRET = crypto.randomBytes(32).toString("hex");
 const loginAttempts = new Map();
 const ALLOWED_CATEGORIES = new Set(["Materiaux", "Alimentation", "Equipement", "Autre"]);
 const PRODUCT_FIELDS = new Set(["name", "category", "quantity", "threshold", "unitPrice", "updatedAt"]);
@@ -45,6 +55,22 @@ const USER_ROLES = new Set(["admin", "magasinier", "lecture"]);
 const SUBSCRIPTION_PLANS = new Set(["free", "starter", "pro"]);
 const INVITATION_ROLES = new Set(["admin", "magasinier", "lecture"]);
 const USERNAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N} ._'-]{2,79}$/u;
+
+function validateSessionConfiguration() {
+  const secret = String(process.env.SESSION_SECRET || "").trim();
+  if (IS_PRODUCTION && secret.length < 32) {
+    throw new Error("Configuration serveur invalide : SESSION_SECRET est requis en production.");
+  }
+}
+
+function validatePersistenceConfiguration() {
+  if (IS_PRODUCTION && !DATABASE_URL) {
+    throw new Error("Configuration serveur invalide : DATABASE_URL est requis en production.");
+  }
+}
+
+validateSessionConfiguration();
+validatePersistenceConfiguration();
 
 function loadEnvFile() {
   const envFile = path.join(ROOT, ".env");
@@ -73,6 +99,8 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
+  ".txt": "text/plain; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
   ".webp": "image/webp"
 };
 
@@ -138,8 +166,27 @@ function backupStockFile() {
   }
 }
 
-function hashPassword(password) {
+function hashLegacyPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(SCRYPT_SALT_LENGTH);
+  const derivedKey = await scryptAsync(password, salt, SCRYPT_KEY_LENGTH, {
+    N: SCRYPT_COST,
+    r: SCRYPT_BLOCK_SIZE,
+    p: SCRYPT_PARALLELIZATION,
+    maxmem: SCRYPT_MAX_MEMORY
+  });
+
+  return [
+    "scrypt",
+    SCRYPT_COST,
+    SCRYPT_BLOCK_SIZE,
+    SCRYPT_PARALLELIZATION,
+    salt.toString("base64url"),
+    Buffer.from(derivedKey).toString("base64url")
+  ].join("$");
 }
 
 function hashInvitationToken(token) {
@@ -168,15 +215,12 @@ function safeDecodeURIComponent(value) {
 
 function configuredUsers() {
   return USER_ENV_KEYS
-    .map(user => ({ role: user.role, passwordHash: process.env[user.env] }))
+    .map(user => ({ role: user.role, env: user.env, passwordHash: process.env[user.env] }))
     .filter(user => Boolean(user.passwordHash));
 }
 
 function sessionSecret() {
-  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
-
-  const hashes = configuredUsers().map(user => user.passwordHash).join("|");
-  return crypto.createHash("sha256").update(`${hashes}|dd-service-session`).digest("hex");
+  return String(process.env.SESSION_SECRET || "").trim() || DEVELOPMENT_SESSION_SECRET;
 }
 
 function sign(value) {
@@ -189,7 +233,9 @@ function createSessionToken(session) {
 }
 
 function readSessionToken(token) {
-  const [payload, signature] = String(token || "").split(".");
+  const parts = String(token || "").split(".");
+  if (parts.length !== 2) return null;
+  const [payload, signature] = parts;
   if (!payload || !signature) return null;
 
   const expectedSignature = sign(payload);
@@ -207,14 +253,30 @@ function readSessionToken(token) {
   }
 
   try {
-    return JSON.parse(base64UrlDecode(payload));
+    const session = JSON.parse(base64UrlDecode(payload));
+    if (!session || typeof session !== "object" || Array.isArray(session)
+        || typeof session.expiresAt !== "number" || !Number.isFinite(session.expiresAt)) {
+      return null;
+    }
+    return session;
   } catch {
     return null;
   }
 }
 
-function findUserByPassword(password) {
-  return configuredUsers().find(user => safePasswordHashMatch(password, user.passwordHash)) || null;
+async function findUserByPassword(password) {
+  for (const user of configuredUsers()) {
+    const verification = await verifyPassword(password, user.passwordHash);
+    if (!verification.valid) continue;
+
+    if (verification.passwordHash) {
+      process.env[user.env] = verification.passwordHash;
+      user.passwordHash = verification.passwordHash;
+    }
+    return user;
+  }
+
+  return null;
 }
 
 function parseCookies(request) {
@@ -236,7 +298,7 @@ function getSession(request) {
   if (!token) return null;
 
   const session = readSessionToken(token);
-  if (!session || session.expiresAt < Date.now()) {
+  if (!session || session.expiresAt <= Date.now()) {
     return null;
   }
 
@@ -277,8 +339,30 @@ function clientIp(request) {
   return request.socket.remoteAddress || "unknown";
 }
 
-function loginState(request) {
+async function loginState(request) {
   const ip = clientIp(request);
+
+  if (useDatabase()) {
+    await ensureDatabase();
+    const result = await queryDatabase(
+      "SELECT failed_count, locked_until FROM login_attempts WHERE ip_address = $1",
+      [ip]
+    );
+    const row = result.rows[0];
+    if (!row) return { ip, state: { count: 0, lockedUntil: 0 } };
+
+    const lockedUntil = row.locked_until ? new Date(row.locked_until).getTime() : 0;
+    if (lockedUntil && lockedUntil <= Date.now()) {
+      await queryDatabase("DELETE FROM login_attempts WHERE ip_address = $1", [ip]);
+      return { ip, state: { count: 0, lockedUntil: 0 } };
+    }
+
+    return {
+      ip,
+      state: { count: Number(row.failed_count), lockedUntil }
+    };
+  }
+
   const state = loginAttempts.get(ip) || { count: 0, lockedUntil: 0 };
 
   if (state.lockedUntil && state.lockedUntil <= Date.now()) {
@@ -289,15 +373,37 @@ function loginState(request) {
   return { ip, state };
 }
 
-function recordLoginFailure(ip, state) {
+async function recordLoginFailure(ip, state) {
   const nextCount = state.count + 1;
+
+  if (useDatabase()) {
+    await queryDatabase(`
+      INSERT INTO login_attempts (ip_address, failed_count, locked_until, updated_at)
+      VALUES ($1, 1, NULL, now())
+      ON CONFLICT (ip_address) DO UPDATE
+      SET failed_count = login_attempts.failed_count + 1,
+          locked_until = CASE
+            WHEN login_attempts.failed_count + 1 >= $2
+              THEN now() + ($3::bigint * interval '1 millisecond')
+            ELSE NULL
+          END,
+          updated_at = now()
+    `, [ip, LOGIN_MAX_ATTEMPTS, LOGIN_LOCK_MS]);
+    return;
+  }
+
   loginAttempts.set(ip, {
     count: nextCount,
     lockedUntil: nextCount >= LOGIN_MAX_ATTEMPTS ? Date.now() + LOGIN_LOCK_MS : 0
   });
 }
 
-function clearLoginFailures(ip) {
+async function clearLoginFailures(ip) {
+  if (useDatabase()) {
+    await queryDatabase("DELETE FROM login_attempts WHERE ip_address = $1", [ip]);
+    return;
+  }
+
   loginAttempts.delete(ip);
 }
 
@@ -378,10 +484,68 @@ function validateUserId(value) {
   return id;
 }
 
-function safePasswordHashMatch(password, expectedHash) {
-  const actual = Buffer.from(hashPassword(password), "utf8");
-  const expected = Buffer.from(String(expectedHash || ""), "utf8");
-  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+function parseScryptHash(value) {
+  const parts = String(value || "").split("$");
+  if (parts.length !== 6 || parts[0] !== "scrypt") return null;
+
+  const cost = Number(parts[1]);
+  const blockSize = Number(parts[2]);
+  const parallelization = Number(parts[3]);
+  const salt = Buffer.from(parts[4], "base64url");
+  const expected = Buffer.from(parts[5], "base64url");
+
+  if (!Number.isSafeInteger(cost) || cost < 2 ** 10 || cost > 2 ** 20
+      || !Number.isSafeInteger(blockSize) || blockSize < 1 || blockSize > 32
+      || !Number.isSafeInteger(parallelization) || parallelization < 1 || parallelization > 16
+      || (cost & (cost - 1)) !== 0
+      || cost * blockSize * 128 > SCRYPT_MAX_MEMORY
+      || salt.length < 16 || salt.length > 64 || expected.length !== SCRYPT_KEY_LENGTH) {
+    return null;
+  }
+
+  return { cost, blockSize, parallelization, salt, expected };
+}
+
+async function verifyPassword(password, expectedHash) {
+  const storedHash = String(expectedHash || "");
+  const scryptHash = parseScryptHash(storedHash);
+
+  if (scryptHash) {
+    const actual = await scryptAsync(
+      password,
+      scryptHash.salt,
+      scryptHash.expected.length,
+      {
+        N: scryptHash.cost,
+        r: scryptHash.blockSize,
+        p: scryptHash.parallelization,
+        maxmem: SCRYPT_MAX_MEMORY
+      }
+    );
+    return {
+      valid: crypto.timingSafeEqual(Buffer.from(actual), scryptHash.expected),
+      passwordHash: null
+    };
+  }
+
+  if (!/^[a-f\d]{64}$/i.test(storedHash)) {
+    return { valid: false, passwordHash: null };
+  }
+
+  const actual = Buffer.from(hashLegacyPassword(password), "hex");
+  const expected = Buffer.from(storedHash, "hex");
+  if (!crypto.timingSafeEqual(actual, expected)) {
+    return { valid: false, passwordHash: null };
+  }
+
+  return { valid: true, passwordHash: await hashPassword(password) };
+}
+
+async function updateDatabasePasswordHash(id, passwordHash) {
+  await queryDatabase(
+    "UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2",
+    [passwordHash, id]
+  );
 }
 
 function validateUserPayload(data, { partial = false } = {}) {
@@ -712,6 +876,14 @@ async function ensureDatabase() {
         )
       `);
       await queryDatabase("CREATE INDEX IF NOT EXISTS invitations_company_idx ON invitations (company_id, created_at DESC)");
+      await queryDatabase(`
+        CREATE TABLE IF NOT EXISTS login_attempts (
+          ip_address TEXT PRIMARY KEY,
+          failed_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_count >= 0),
+          locked_until TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
       await queryDatabase(`
         INSERT INTO company_memberships (company_id, user_id, role)
         SELECT $1, id, role
@@ -1144,10 +1316,13 @@ async function getCompanyMembership(userId, companyId) {
 async function requireCompanyAdmin(request, response, companyId) {
   const session = await requireActiveSession(request, response);
   if (!session) return null;
-  const membership = session.userId
+  const hasAccess = session.userId
+    ? await hasActiveCompanyMembership(session.userId, companyId)
+    : false;
+  const membership = hasAccess
     ? await getCompanyMembership(session.userId, companyId)
     : null;
-  if (!membership || !membership.active || membership.role !== "admin") {
+  if (!membership || membership.role !== "admin") {
     sendJson(response, 403, { error: "Action reservee a l'administrateur de cette entreprise" });
     return null;
   }
@@ -1313,7 +1488,7 @@ async function createUserInDatabase(payload, companyId = defaultCompanyId) {
     INSERT INTO users (username, role, password_hash)
     VALUES ($1, $2, $3)
     RETURNING id, username, role, active, created_at, updated_at
-  `, [payload.username, payload.role, hashPassword(payload.password)]);
+  `, [payload.username, payload.role, await hashPassword(payload.password)]);
   await queryDatabase(`
     INSERT INTO company_memberships (company_id, user_id, role)
     VALUES ($1, $2, $3)
@@ -1343,7 +1518,7 @@ async function updateUserInDatabase(id, payload, companyId = defaultCompanyId) {
 
   if (payload.username !== undefined) addField("username =", payload.username);
   if (payload.role !== undefined) addField("role =", payload.role);
-  if (payload.password !== undefined) addField("password_hash =", hashPassword(payload.password));
+  if (payload.password !== undefined) addField("password_hash =", await hashPassword(payload.password));
   if (payload.active !== undefined) addField("active =", payload.active);
 
   if (fields.length === 0) throw new Error("Aucune modification demandee");
@@ -1486,7 +1661,7 @@ async function handleApi(request, response, pathname) {
   }
 
   if (request.method === "POST" && pathname === "/api/login") {
-    const { ip, state } = loginState(request);
+    const { ip, state } = await loginState(request);
 
     if (configuredUsers().length === 0 && !useDatabase()) {
       sendJson(response, 500, {
@@ -1496,12 +1671,8 @@ async function handleApi(request, response, pathname) {
     }
 
     if (state.lockedUntil > Date.now()) {
-      const retryAfter = Math.ceil((state.lockedUntil - Date.now()) / 1000);
       sendJson(response, 429, {
-        error: "Trop de tentatives. Reessaie plus tard.",
-        retryAfter
-      }, {
-        "Retry-After": String(retryAfter)
+        error: "Trop de tentatives. Reessaie plus tard."
       });
       return;
     }
@@ -1516,7 +1687,13 @@ async function handleApi(request, response, pathname) {
       await ensureDatabase();
       if (identifier) {
         const databaseUser = await findDatabaseUserByUsername(identifier);
-        if (databaseUser && databaseUser.active && safePasswordHashMatch(password, databaseUser.password_hash)) {
+        const verification = databaseUser
+          ? await verifyPassword(password, databaseUser.password_hash)
+          : { valid: false, passwordHash: null };
+        if (databaseUser && databaseUser.active && verification.valid) {
+          if (verification.passwordHash) {
+            await updateDatabasePasswordHash(databaseUser.id, verification.passwordHash);
+          }
           user = { role: databaseUser.role };
           userId = String(databaseUser.id);
         }
@@ -1524,19 +1701,25 @@ async function handleApi(request, response, pathname) {
     }
 
     if (!user && !identifier) {
-      user = findUserByPassword(password);
+      user = await findUserByPassword(password);
     } else if (!user && identifier) {
       const fallbackUser = configuredUsers().find(candidate => candidate.role === identifier);
-      if (fallbackUser && safePasswordHashMatch(password, fallbackUser.passwordHash)) {
-        user = fallbackUser;
+      if (fallbackUser) {
+        const verification = await verifyPassword(password, fallbackUser.passwordHash);
+        if (verification.valid) {
+          if (verification.passwordHash) {
+            process.env[fallbackUser.env] = verification.passwordHash;
+            fallbackUser.passwordHash = verification.passwordHash;
+          }
+          user = fallbackUser;
+        }
       }
     }
 
     if (!user) {
-      recordLoginFailure(ip, state);
+      await recordLoginFailure(ip, state);
       sendJson(response, 401, {
-        error: "Mot de passe incorrect",
-        remainingAttempts: Math.max(LOGIN_MAX_ATTEMPTS - state.count - 1, 0)
+        error: "Identifiant ou mot de passe incorrect."
       });
       return;
     }
@@ -1546,7 +1729,7 @@ async function handleApi(request, response, pathname) {
       userId = String(databaseUser.id);
     }
 
-    clearLoginFailures(ip);
+    await clearLoginFailures(ip);
     const csrfToken = crypto.randomBytes(32).toString("hex");
     const token = createSessionToken({
       csrfToken,
